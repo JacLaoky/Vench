@@ -1,0 +1,84 @@
+{
+  "sectors": {
+    "Technology":       "US.XLK",
+    "Energy":           "US.XLE",
+    "Financials":       "US.XLF",
+    "Healthcare":       "US.XLV",
+    "Industrials":      "US.XLI",
+    "Consumer Disc.":   "US.XLY",
+    "Consumer Staples": "US.XLP",
+    "Utilities":        "US.XLU",
+    "Real Estate":      "US.XLRE",
+    "Materials":        "US.XLB",
+    "Communication":    "US.XLC"
+  },
+  "themes": {
+    "科技": {
+      "Semiconductors":    "US.SOXX",
+      "AI & Robotics":     "US.BOTZ",
+      "Cybersecurity":     "US.CIBR",
+      "Cloud Computing":   "US.SKYY",
+      "Software":          "US.IGV",
+      "Internet":          "US.FDN",
+      "Fintech":           "US.FINX",
+      "ARK Innovation":    "US.ARKK",
+      "ARK Next Gen Web":  "US.ARKW",
+      "ARK Autonomous":    "US.ARKQ",
+      "Quantum Computing": "US.QTUM",
+      "Data Centers":      "US.DTCR"
+    },
+    "能源 & 资源": {
+      "Clean Energy":      "US.ICLN",
+      "Solar":             "US.TAN",
+      "Wind Energy":       "US.FAN",
+      "Uranium":           "US.URA",
+      "Oil & Gas Expl.":   "US.XOP",
+      "Oil Services":      "US.OIH",
+      "MLPs":              "US.AMLP",
+      "Copper":            "US.COPX",
+      "Steel":             "US.SLX",
+      "Rare Earths":       "US.REMX"
+    },
+    "医疗 & 生命科学": {
+      "Biotech":           "US.XBI",
+      "Genomics":          "US.ARKG",
+      "Pharma":            "US.XPH",
+      "Medical Devices":   "US.IHI",
+      "Health Innovation": "US.IDNA"
+    },
+    "消费 & 工业": {
+      "Electric Vehicles": "US.LIT",
+      "Autonomous EV":     "US.DRIV",
+      "Aerospace":         "US.ITA",
+      "Defense":           "US.XAR",
+      "Infrastructure":    "US.PAVE",
+      "Homebuilders":      "US.XHB",
+      "Cannabis":          "US.MJ",
+      "Sports Betting":    "US.BETZ",
+      "Video Games":       "US.HERO"
+    },
+    "全球市场": {
+      "China Internet":    "US.KWEB",
+      "China Large Cap":   "US.MCHI",
+      "India":             "US.INDA",
+      "Japan":             "US.EWJ",
+      "Europe":            "US.VGK",
+      "Korea":             "US.EWY",
+      "Emerging Markets":  "US.EEM",
+      "Vietnam":           "US.VNM"
+    },
+    "贵金属 & 加密": {
+      "Gold":              "US.GLD",
+      "Gold Miners":       "US.GDX",
+      "Silver":            "US.SLV",
+      "Bitcoin ETF":       "US.IBIT",
+      "Crypto Miners":     "US.WGMI"
+    },
+    "宏观 & 债券": {
+      "Long Treasuries":   "US.TLT",
+      "Short Treasuries":  "US.SHY",
+      "TIPS":              "US.TIP",
+      "High Yield Bond":   "US.HYG"
+    }
+  }
+}
