@@ -18,15 +18,18 @@ class TagChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = TagColors.forTag(tag);
+    final isDark = AppColors.darkBg.computeLuminance() < 0.5;
+    final bgAlpha   = selected ? 0.28 : (isDark ? 0.15 : 0.12);
+    final bdrAlpha  = selected ? 0.75 : (isDark ? 0.35 : 0.50);
     return GestureDetector(
       onTap: onTap,
       child: Container(
         padding: EdgeInsets.fromLTRB(8, 3, onRemove != null ? 4 : 8, 3),
         decoration: BoxDecoration(
-          color: selected ? color.withValues(alpha: 0.25) : color.withValues(alpha: 0.12),
+          color: color.withValues(alpha: bgAlpha),
           borderRadius: BorderRadius.circular(6),
           border: Border.all(
-            color: selected ? color.withValues(alpha: 0.7) : color.withValues(alpha: 0.3),
+            color: color.withValues(alpha: bdrAlpha),
             width: 0.8,
           ),
         ),

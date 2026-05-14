@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo } from 'react'
 import { api } from '../api'
 import { Search } from 'lucide-react'
+import JournalAI from '../components/JournalAI'
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, ReferenceLine
 } from 'recharts'
@@ -102,6 +103,7 @@ export default function Journal() {
   if (error) return <div className="text-red-400 text-sm">Error: {error}</div>
 
   return (
+    <>
     <div>
       <div className="flex items-center justify-between mb-4">
         <h1 className="text-xl font-semibold text-white">Trade Journal</h1>
@@ -147,7 +149,7 @@ export default function Journal() {
                     <td className="px-4 py-2.5 text-slate-300">{m.label}</td>
                     <td className="text-right px-4 py-2.5 text-slate-400">{m.trades}</td>
                     <td className={`text-right px-4 py-2.5 font-medium ${m.isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {m.isProfit ? '+' : ''}${m.value.toFixed(2)}
+                      {m.isProfit ? '+' : '-'}${Math.abs(m.value).toFixed(2)}
                     </td>
                   </tr>
                 ))}
@@ -195,7 +197,7 @@ export default function Journal() {
                   <div className="flex justify-between items-start">
                     <span className="font-medium text-white text-sm">{t.ticker}</span>
                     <span className={`text-sm font-medium ${t.isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {t.isProfit ? '+' : ''}${Math.abs(t.pnl).toFixed(2)}
+                      {t.isProfit ? '+' : '-'}${Math.abs(t.pnl).toFixed(2)}
                     </span>
                   </div>
                   <div className="flex justify-between mt-1">
@@ -226,7 +228,7 @@ export default function Journal() {
                     <h2 className="text-lg font-semibold text-white">{selected.ticker}</h2>
                     <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-slate-400">{selected.trade_type}</span>
                     <span className={`text-lg font-semibold ${selected.isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {selected.isProfit ? '+' : ''}${selected.pnl.toFixed(2)} ({selected.pct})
+                      {selected.isProfit ? '+' : '-'}${Math.abs(selected.pnl).toFixed(2)} ({selected.pct})
                     </span>
                   </div>
                   <p className="text-xs text-slate-500 mb-4">{selected.enter_time} → {selected.exit_time} · {selected.holding_time}</p>
@@ -267,5 +269,7 @@ export default function Journal() {
         </div>
       )}
     </div>
+    <JournalAI />
+  </>
   )
 }

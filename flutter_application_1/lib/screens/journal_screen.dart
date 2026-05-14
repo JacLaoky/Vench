@@ -93,8 +93,11 @@ class _JournalScreenState extends State<JournalScreen> {
             _allTags = tagSet.toList()..sort();
             isLoading = false;
           });
+          return; // success — exit early
         }
       }
+      // Non-200 or unexpected status field
+      setState(() { isLoading = false; hasError = true; });
     } catch (e) {
       debugPrint('获取复盘数据失败: $e');
       setState(() { isLoading = false; hasError = true; });
@@ -360,14 +363,20 @@ class _JournalScreenState extends State<JournalScreen> {
             const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
         decoration: BoxDecoration(
           color: isSelected
-              ? const Color(0xFF2C2C3E)
-              : AppColors.card,
+              ? AppColors.blue.withValues(alpha: 0.15)
+              : AppColors.surface,
           borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected
+                ? AppColors.blue.withValues(alpha: 0.5)
+                : AppColors.border,
+            width: 0.8,
+          ),
         ),
         child: Text(
           text,
           style: TextStyle(
-            color: isSelected ? Colors.white : AppColors.dim,
+            color: isSelected ? AppColors.blue : AppColors.dim,
             fontWeight: FontWeight.w600,
           ),
         ),

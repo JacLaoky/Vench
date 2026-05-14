@@ -19,12 +19,13 @@ Personal trading journal and analytics platform with a Flask REST API, React web
 - **Calculator** — scale-in position sizing and swing trade risk calculator
 - **All Trades** — searchable, filterable, sortable full trade history
 - **Earnings Calendar** — upcoming earnings for tickers in your trade history and current holdings
+- **Journal AI** — floating RAG chat widget; ask natural-language questions over your trade notes and daily journal entries (DeepSeek API + ChromaDB + multilingual sentence-transformers)
 
 ## Stack
 
 | Layer | Tech |
 |-------|------|
-| Backend | Python · Flask · SQLite · yfinance · Moomoo OpenAPI |
+| Backend | Python · Flask · SQLite · yfinance · Moomoo OpenAPI · ChromaDB · DeepSeek API |
 | Web | React · TypeScript · Vite · Tailwind CSS v4 · Recharts |
 | Mobile | Flutter · Dart |
 
@@ -33,8 +34,8 @@ Personal trading journal and analytics platform with a Flask REST API, React web
 ```
 Vench/
 ├── backend/
-│   ├── kinfo_c.py        # Flask app + all API routes
-│   ├── app.py            # Entry point
+│   ├── app.py            # Flask app — all 25 API routes, PnL engine, rate limiter, caching
+│   ├── rag.py            # RAG pipeline — ChromaDB indexing, DeepSeek Q&A
 │   ├── etfs.json         # Sector / theme ETF definitions
 │   └── .env              # Secrets (not committed)
 ├── web/
@@ -101,7 +102,7 @@ All secrets and environment-specific values are loaded from `.env` files, which 
 
 | File | Variables |
 |------|-----------|
-| `backend/.env` | `MOOMOO_PWD`, `MOOMOO_ACC_ID`, `MOOMOO_HOST`, `MOOMOO_PORT` |
+| `backend/.env` | `MOOMOO_PWD`, `MOOMOO_ACC_ID`, `MOOMOO_HOST`, `MOOMOO_PORT`, `DEEPSEEK_API_KEY` (optional, enables Journal AI) |
 | `web/.env` | `VITE_API_URL` |
 | Flutter | Pass `API_URL` via `--dart-define` at build time |
 
@@ -126,12 +127,13 @@ MIT
 - **Calculator** — 分批建仓计算器和波段交易风险计算器
 - **All Trades** — 全部历史交易，支持搜索、筛选、排序
 - **Earnings Calendar** — 自动获取交易历史和当前持仓中标的的财报日期
+- **Journal AI** — 悬浮 RAG 聊天窗口，用自然语言查询交易笔记与每日日志（DeepSeek API + ChromaDB + 多语言 sentence-transformers）
 
 ## 技术栈
 
 | 层级 | 技术 |
 |------|------|
-| 后端 | Python · Flask · SQLite · yfinance · 富途 OpenAPI |
+| 后端 | Python · Flask · SQLite · yfinance · 富途 OpenAPI · ChromaDB · DeepSeek API |
 | Web 端 | React · TypeScript · Vite · Tailwind CSS v4 · Recharts |
 | 移动端 | Flutter · Dart |
 
@@ -140,8 +142,8 @@ MIT
 ```
 Vench/
 ├── backend/
-│   ├── kinfo_c.py        # Flask 主程序 + 所有 API 路由
-│   ├── app.py            # 入口文件
+│   ├── app.py            # Flask 主程序 — 全部 25 个 API 路由、PnL 引擎、限速器、缓存
+│   ├── rag.py            # RAG pipeline — ChromaDB 索引、DeepSeek 问答
 │   ├── etfs.json         # 板块 / 主题 ETF 配置
 │   └── .env              # 密钥（不提交）
 ├── web/
@@ -208,7 +210,7 @@ flutter run --dart-define=API_URL=http://你的服务器:5001
 
 | 文件 | 变量 |
 |------|------|
-| `backend/.env` | `MOOMOO_PWD`、`MOOMOO_ACC_ID`、`MOOMOO_HOST`、`MOOMOO_PORT` |
+| `backend/.env` | `MOOMOO_PWD`、`MOOMOO_ACC_ID`、`MOOMOO_HOST`、`MOOMOO_PORT`、`DEEPSEEK_API_KEY`（可选，启用 Journal AI） |
 | `web/.env` | `VITE_API_URL` |
 | Flutter | 通过 `--dart-define=API_URL=...` 在编译时传入 |
 

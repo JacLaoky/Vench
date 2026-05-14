@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_application_1/constants.dart';
 
 /// Reusable empty-state placeholder with icon, title, subtitle and optional action.
 class EmptyStateWidget extends StatelessWidget {
@@ -23,12 +24,12 @@ class EmptyStateWidget extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(icon, size: 64, color: const Color(0xFF2C2C2E)),
+            Icon(icon, size: 64, color: AppColors.dimDark),
             const SizedBox(height: 20),
             Text(
               title,
-              style: const TextStyle(
-                color: Color(0xFFCCCCCC),
+              style: TextStyle(
+                color: AppColors.text,
                 fontSize: 18,
                 fontWeight: FontWeight.w600,
               ),
@@ -37,8 +38,8 @@ class EmptyStateWidget extends StatelessWidget {
             const SizedBox(height: 8),
             Text(
               subtitle,
-              style: const TextStyle(
-                color: Color(0xFF666666),
+              style: TextStyle(
+                color: AppColors.dim,
                 fontSize: 14,
                 height: 1.5,
               ),

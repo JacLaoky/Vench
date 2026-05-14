@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_application_1/constants.dart';
 
 /// A pulsing shimmer placeholder — drop-in replacement for loading spinners.
 class ShimmerBox extends StatefulWidget {
@@ -50,10 +51,10 @@ class _ShimmerBoxState extends State<ShimmerBox>
           gradient: LinearGradient(
             begin: Alignment(-2.0 + _anim.value * 4, 0),
             end: Alignment(-1.0 + _anim.value * 4, 0),
-            colors: const [
-              Color(0xFF1A1A1C),
-              Color(0xFF2C2C2E),
-              Color(0xFF1A1A1C),
+            colors: [
+              AppColors.surface,
+              AppColors.surface2,
+              AppColors.surface,
             ],
           ),
         ),
@@ -73,7 +74,7 @@ class ShimmerCard extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFF13151A),
+        color: AppColors.card,
         borderRadius: BorderRadius.circular(16),
       ),
       child: Column(

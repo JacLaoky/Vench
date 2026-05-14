@@ -9,6 +9,7 @@ import Sectors from './pages/Sectors'
 import MarketBreadth from './pages/MarketBreadth'
 import Calendar from './pages/Calendar'
 import Calculator from './pages/Calculator'
+import JournalAI from './components/JournalAI'
 
 export default function App() {
   return (
@@ -25,6 +26,7 @@ export default function App() {
           <Route path="/calendar" element={<Calendar />} />
           <Route path="/calculator" element={<Calculator />} />
         </Routes>
+        <JournalAI />
       </Layout>
     </BrowserRouter>
   )

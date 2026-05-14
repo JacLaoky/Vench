@@ -1,4 +1,9 @@
 import os
+# Fix Protobuf compatibility — must be set before any moomoo import
+os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
+
+from dotenv import load_dotenv
+load_dotenv()  # loads .env from current directory
 import uuid
 import json
 import atexit
@@ -12,20 +17,17 @@ from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from moomoo import *
 
-# Fix Mac Protobuf error
-os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
-
 app = Flask(__name__)
 CORS(app)
 
 # ======================== ⚙️ Configuration ========================
-MOOMOO_PWD    = os.environ.get('MOOMOO_PWD', '')
 MOOMOO_ACC_ID = int(os.environ.get('MOOMOO_ACC_ID', '0'))
 TRD_ENV   = TrdEnv.REAL
 HOST_IP   = os.environ.get('MOOMOO_HOST', '127.0.0.1')
 HOST_PORT = int(os.environ.get('MOOMOO_PORT', '11111'))
-DB_FILE    = 'local.db'
-UPLOAD_DIR = 'trade_images'          # local directory for trade screenshots
+DB_FILE         = 'local.db'
+UPLOAD_DIR      = 'trade_images'          # local directory for trade screenshots
+DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '')
 SYNC_COOLDOWN_SECS = 30              # minimum seconds between /api/sync calls
 SECTOR_CACHE_SECS  = 60              # /api/sectors cache TTL (11 sectors, fast)
 THEME_CACHE_SECS   = 600             # /api/sectors?type=theme cache TTL (large pool, slow)
@@ -270,9 +272,6 @@ trd_ctx   = OpenSecTradeContext(filter_trdmarket=TrdMarket.US,
                                 host=HOST_IP, port=HOST_PORT,
                                 security_firm=SecurityFirm.FUTUSG)
 quote_ctx = OpenQuoteContext(host=HOST_IP, port=HOST_PORT)
-
-ret, data = trd_ctx.unlock_trade(password=MOOMOO_PWD)
-print("Moomoo trade unlock successful" if ret == RET_OK else f"❌ Unlock failed: {data}")
 
 # Gracefully close both connections on process exit
 atexit.register(lambda: (trd_ctx.close(), quote_ctx.close()))
@@ -1646,6 +1645,34 @@ def save_daily_note(date: str):
     return jsonify({"status": "success"}), 200
 
 
+# ======================== Journal AI (RAG) ========================
+
+@app.route('/api/journal/ask', methods=['POST'])
+def journal_ask():
+    """Answer a natural-language question about the user's trading journal via RAG."""
+    try:
+        import rag
+        body     = request.get_json(silent=True) or {}
+        question = str(body.get('question', '')).strip()
+        if not question:
+            return jsonify({"error": "question is required"}), 400
+        result = rag.ask(question)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/journal/reindex', methods=['POST'])
+def journal_reindex():
+    """Force-rebuild the RAG vector index (call after adding new notes)."""
+    try:
+        import rag
+        count = rag.build_index(force=True)
+        return jsonify({"status": "ok", "indexed": count}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 # ======================== Sector Performance ========================
 
 @app.route('/api/sectors', methods=['GET'])
@@ -2321,4 +2348,12 @@ def get_account():
 
 if __name__ == '__main__':
     print("Backend Server Running")
+    # Kick off RAG index build in background (non-blocking)
+    if DEEPSEEK_API_KEY:
+        try:
+            import rag
+            rag.init_async()
+            print("RAG index building in background...")
+        except Exception as e:
+            print(f"RAG init skipped: {e}")
     app.run(host='0.0.0.0', port=5001)

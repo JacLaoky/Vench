@@ -78,12 +78,12 @@ export default function Dashboard() {
         <StatCard label="Market Value" value={fmt(totalMktVal)} />
         <StatCard
           label="Unrealized P&L"
-          value={`${totalPnl >= 0 ? '+' : ''}${fmt(totalPnl)}`}
+          value={`${totalPnl >= 0 ? '+' : '-'}${fmt(totalPnl)}`}
           positive={totalPnl >= 0}
         />
         <StatCard
           label="Today's P&L"
-          value={`${todayPnl >= 0 ? '+' : ''}${fmt(todayPnl)}`}
+          value={`${todayPnl >= 0 ? '+' : '-'}${fmt(todayPnl)}`}
           positive={todayPnl >= 0}
         />
       </div>
@@ -122,12 +122,12 @@ export default function Dashboard() {
                     <td className={`text-right px-4 py-3 font-medium ${p.pl_val >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                       <div className="flex items-center justify-end gap-1">
                         {p.pl_val >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
-                        {p.pl_val >= 0 ? '+' : ''}{fmt(p.pl_val)}
+                        {p.pl_val >= 0 ? '+' : '-'}{fmt(p.pl_val)}
                       </div>
                       <div className="text-xs opacity-70">{pct(p.pl_ratio)}</div>
                     </td>
                     <td className={`text-right px-4 py-3 text-xs ${p.today_pl_val >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {p.today_pl_val >= 0 ? '+' : ''}{fmt(p.today_pl_val)}
+                      {p.today_pl_val >= 0 ? '+' : '-'}{fmt(p.today_pl_val)}
                     </td>
                     <td className="text-right px-4 py-3 text-slate-500 text-xs">
                       {p.stop_price ? `$${p.stop_price.toFixed(2)}` : '—'}
