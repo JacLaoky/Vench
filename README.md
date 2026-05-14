@@ -19,7 +19,7 @@ Personal trading journal and analytics platform with a Flask REST API, React web
 - **Calculator** — scale-in position sizing and swing trade risk calculator
 - **All Trades** — searchable, filterable, sortable full trade history
 - **Earnings Calendar** — upcoming earnings for tickers in your trade history and current holdings
-- **Journal AI** — floating RAG chat widget; ask natural-language questions over your trade notes and daily journal entries (DeepSeek API + ChromaDB + multilingual sentence-transformers)
+- **Journal AI** — floating AI chat widget powered by a Function Calling Agent; two tools: `run_sql` for numeric queries (SQLite `ticker_pnl` view + `position_pnl` table) and `search_notes` for semantic search over diary and trade notes (ChromaDB + multilingual sentence-transformers); SSE streaming with per-tab session memory (DeepSeek API)
 
 ## Stack
 
@@ -35,7 +35,7 @@ Personal trading journal and analytics platform with a Flask REST API, React web
 Vench/
 ├── backend/
 │   ├── app.py            # Flask app — all 25 API routes, PnL engine, rate limiter, caching
-│   ├── rag.py            # RAG pipeline — ChromaDB indexing, DeepSeek Q&A
+│   ├── rag.py            # Journal AI — Function Calling Agent, SSE streaming, session memory
 │   ├── etfs.json         # Sector / theme ETF definitions
 │   └── .env              # Secrets (not committed)
 ├── web/
@@ -127,7 +127,7 @@ MIT
 - **Calculator** — 分批建仓计算器和波段交易风险计算器
 - **All Trades** — 全部历史交易，支持搜索、筛选、排序
 - **Earnings Calendar** — 自动获取交易历史和当前持仓中标的的财报日期
-- **Journal AI** — 悬浮 RAG 聊天窗口，用自然语言查询交易笔记与每日日志（DeepSeek API + ChromaDB + 多语言 sentence-transformers）
+- **Journal AI** — 悬浮 AI 聊天窗口，Function Calling Agent 架构；两个工具：`run_sql`（查 SQLite `ticker_pnl` 视图和 `position_pnl` 表）和 `search_notes`（ChromaDB 语义搜索日记和笔记）；SSE 流式输出 + session 对话记忆（DeepSeek API）
 
 ## 技术栈
 
@@ -143,7 +143,7 @@ MIT
 Vench/
 ├── backend/
 │   ├── app.py            # Flask 主程序 — 全部 25 个 API 路由、PnL 引擎、限速器、缓存
-│   ├── rag.py            # RAG pipeline — ChromaDB 索引、DeepSeek 问答
+│   ├── rag.py            # Journal AI — Function Calling Agent、SSE 流式输出、session 记忆
 │   ├── etfs.json         # 板块 / 主题 ETF 配置
 │   └── .env              # 密钥（不提交）
 ├── web/

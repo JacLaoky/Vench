@@ -20,6 +20,5 @@ export const api = {
   getNote: (tradeId: string) => http.get(`/notes/${tradeId}`).then(r => r.data),
   saveNote: (tradeId: string, note: string) => http.post(`/notes/${tradeId}`, { note }).then(r => r.data),
   sync: () => http.get('/sync').then(r => r.data),
-  journalAsk:     (question: string) => http.post('/journal/ask', { question }).then(r => r.data),
   journalReindex: () => http.post('/journal/reindex').then(r => r.data),
 }

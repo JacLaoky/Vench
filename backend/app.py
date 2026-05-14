@@ -13,9 +13,10 @@ import collections
 from datetime import datetime
 import sqlite3
 import pandas as pd
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
 from flask_cors import CORS
 from moomoo import *
+from flask import Response, stream_with_context  # re-import after moomoo to avoid shadowing
 
 app = Flask(__name__)
 CORS(app)
@@ -201,6 +202,33 @@ def init_db():
             stop_price   REAL NOT NULL,
             updated_at   TEXT NOT NULL
         )
+    ''')
+
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS position_pnl (
+            position_id  TEXT PRIMARY KEY,
+            code         TEXT NOT NULL,
+            realized_pnl REAL NOT NULL,
+            is_win       INTEGER NOT NULL,
+            open_time    TEXT,
+            close_time   TEXT
+        )
+    ''')
+
+    # ticker_pnl: per-ticker net P&L view (use this for ranking/win-rate questions)
+    conn.execute('''
+        CREATE VIEW IF NOT EXISTS ticker_pnl AS
+        SELECT
+            code,
+            COUNT(*)                              AS total_positions,
+            SUM(is_win)                           AS wins,
+            COUNT(*) - SUM(is_win)                AS losses,
+            ROUND(SUM(realized_pnl), 2)           AS net_pnl,
+            ROUND(MAX(realized_pnl), 2)           AS best_position,
+            ROUND(MIN(realized_pnl), 2)           AS worst_position,
+            ROUND(SUM(is_win)*100.0/COUNT(*), 1)  AS win_rate_pct
+        FROM position_pnl
+        GROUP BY code
     ''')
 
     conn.commit()
@@ -487,6 +515,50 @@ def slice_by_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
     return df.copy()   # 'AT' = All Time
 
 
+
+def _write_position_pnl():
+    """Write FIFO-accurate pnl per position into position_pnl table for RAG SQL queries."""
+    try:
+        df = load_df_with_pnl()
+        closed = df[df['realized_pnl'] != 0][
+            ['position_id', 'code', 'realized_pnl', 'is_win', 'create_time']
+        ].copy()
+        if closed.empty:
+            return
+
+        # Aggregate by position_id (partial closes → one row per position)
+        agg = closed.groupby('position_id').agg(
+            code=('code', 'first'),
+            realized_pnl=('realized_pnl', 'sum'),
+            open_time=('create_time', 'min'),
+            close_time=('create_time', 'max'),
+        ).reset_index()
+        agg['is_win'] = (agg['realized_pnl'] > 0).astype(int)
+
+        conn = sqlite3.connect(DB_FILE)
+        conn.execute("DELETE FROM position_pnl")
+        conn.executemany(
+            "INSERT INTO position_pnl (position_id, code, realized_pnl, is_win, open_time, close_time) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    row['position_id'],
+                    row['code'],
+                    round(float(row['realized_pnl']), 2),
+                    int(row['is_win']),
+                    str(row['open_time']),
+                    str(row['close_time']),
+                )
+                for _, row in agg.iterrows()
+            ]
+        )
+        conn.commit()
+        conn.close()
+        print(f"[position_pnl] written {len(agg)} positions")
+    except Exception as e:
+        print(f"[position_pnl] write failed: {e}")
+
+
 # ======================== 🧮 Core Financial Algorithms ========================
 
 def calculate_trades_pnl(df: pd.DataFrame) -> pd.DataFrame:
@@ -711,6 +783,13 @@ def trigger_sync():
     if sync_trades_to_db():
         _last_sync_time = time.time()
         assign_position_ids()
+        _write_position_pnl()
+        if DEEPSEEK_API_KEY:
+            try:
+                import rag
+                threading.Thread(target=rag.build_index, kwargs={'force': True}, daemon=True).start()
+            except Exception:
+                pass
         return jsonify({"status": "success", "message": "Sync completed"}), 200
     return jsonify({"status": "error", "message": "Sync failed, check console"}), 500
 
@@ -1647,19 +1726,88 @@ def save_daily_note(date: str):
 
 # ======================== Journal AI (RAG) ========================
 
+# ── Session store ────────────────────────────────────────────────────────────
+_sessions: dict = {}          # session_id → {"history": [...], "ts": float}
+_SESSION_TTL    = 3600        # 1 hour idle timeout
+
+
+def _get_history(session_id: str) -> list:
+    now = _time.time()
+    # Purge expired sessions
+    for k in [k for k, v in _sessions.items() if now - v["ts"] > _SESSION_TTL]:
+        del _sessions[k]
+    if session_id not in _sessions:
+        _sessions[session_id] = {"history": [], "ts": now}
+    _sessions[session_id]["ts"] = now
+    return _sessions[session_id]["history"]
+
+
+def _save_history(session_id: str, history: list):
+    if session_id in _sessions:
+        _sessions[session_id]["history"] = history[-20:]  # keep last 10 turns
+
+
 @app.route('/api/journal/ask', methods=['POST'])
 def journal_ask():
-    """Answer a natural-language question about the user's trading journal via RAG."""
+    """Answer a question with session history (non-streaming)."""
     try:
         import rag
-        body     = request.get_json(silent=True) or {}
-        question = str(body.get('question', '')).strip()
+        body       = request.get_json(silent=True) or {}
+        question   = str(body.get('question', '')).strip()
+        session_id = str(body.get('session_id', 'default'))
         if not question:
             return jsonify({"error": "question is required"}), 400
-        result = rag.ask(question)
+        history = _get_history(session_id)
+        result  = rag.ask(question, history)
+        _save_history(session_id, result.get("history", []))
         return jsonify(result), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/journal/ask/stream', methods=['POST'])
+def journal_ask_stream():
+    """Streaming SSE endpoint with session history."""
+    try:
+        import rag
+        body       = request.get_json(silent=True) or {}
+        question   = str(body.get('question', '')).strip()
+        session_id = str(body.get('session_id', 'default'))
+        if not question:
+            return jsonify({"error": "question is required"}), 400
+
+        history = _get_history(session_id)
+
+        def generate():
+            try:
+                updated_history = history
+                for chunk in rag.ask_stream(question, history):
+                    if chunk.startswith("data: [META]"):
+                        meta = json.loads(chunk[len("data: [META]"):].strip())
+                        updated_history = meta.get("history", history)
+                    yield chunk
+                _save_history(session_id, updated_history)
+            except Exception as e:
+                import traceback; traceback.print_exc()
+                yield f"data: {json.dumps('⚠️ 服务器错误：' + str(e), ensure_ascii=False)}\n\n"
+                yield "data: [DONE]\n\n"
+
+        resp = Response(stream_with_context(generate()), content_type="text/event-stream")
+        resp.headers["X-Accel-Buffering"] = "no"
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/journal/session/clear', methods=['POST'])
+def journal_clear_session():
+    """Clear a session's conversation history."""
+    body       = request.get_json(silent=True) or {}
+    session_id = str(body.get('session_id', 'default'))
+    if session_id in _sessions:
+        _sessions[session_id]["history"] = []
+    return jsonify({"status": "ok"}), 200
 
 
 @app.route('/api/journal/reindex', methods=['POST'])
@@ -2348,6 +2496,7 @@ def get_account():
 
 if __name__ == '__main__':
     print("Backend Server Running")
+    _write_position_pnl()
     # Kick off RAG index build in background (non-blocking)
     if DEEPSEEK_API_KEY:
         try:

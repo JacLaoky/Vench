@@ -1,10 +1,10 @@
 import { useState, useRef, useEffect } from 'react'
-import { api } from '../api'
-import { Bot, Send, X, ChevronDown, RotateCcw } from 'lucide-react'
+import { Bot, Send, X, ChevronDown, RotateCcw, Trash2 } from 'lucide-react'
 
 interface Message {
   role: 'user' | 'assistant'
   content: string
+  streaming?: boolean
 }
 
 const SUGGESTIONS = [
@@ -14,11 +14,16 @@ const SUGGESTIONS = [
   '找一下我提到过止损的笔记',
 ]
 
+// Stable session ID per browser tab (cleared on tab close)
+const SESSION_ID = `session_${Date.now()}_${Math.random().toString(36).slice(2)}`
+
+const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:5001'
+
 export default function JournalAI() {
-  const [open, setOpen]       = useState(false)
+  const [open, setOpen]         = useState(false)
   const [messages, setMessages] = useState<Message[]>([])
-  const [input, setInput]     = useState('')
-  const [loading, setLoading] = useState(false)
+  const [input, setInput]       = useState('')
+  const [loading, setLoading]   = useState(false)
   const [reindexing, setReindexing] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
 
@@ -32,14 +37,74 @@ export default function JournalAI() {
     setInput('')
     setMessages(prev => [...prev, { role: 'user', content: q }])
     setLoading(true)
+
+    // Add empty streaming assistant message
+    setMessages(prev => [...prev, { role: 'assistant', content: '', streaming: true }])
+
     try {
-      const res = await api.journalAsk(q)
-      setMessages(prev => [...prev, { role: 'assistant', content: res.answer }])
+      const res = await fetch(`${API_BASE}/api/journal/ask/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q, session_id: SESSION_ID }),
+      })
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+
+      const reader  = res.body!.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''  // keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          const data = line.slice(6)
+
+          if (data === '[DONE]') break
+          if (data.startsWith('[META]')) continue  // metadata handled server-side
+
+          // Append streamed token
+          const token = JSON.parse(data) as string
+          setMessages(prev => {
+            const updated = [...prev]
+            const last = updated[updated.length - 1]
+            if (last?.role === 'assistant') {
+              updated[updated.length - 1] = { ...last, content: last.content + token }
+            }
+            return updated
+          })
+        }
+      }
+
+      // Mark streaming done
+      setMessages(prev => {
+        const updated = [...prev]
+        const last = updated[updated.length - 1]
+        if (last?.role === 'assistant') {
+          updated[updated.length - 1] = { ...last, streaming: false }
+        }
+        return updated
+      })
+
     } catch {
-      setMessages(prev => [...prev, {
-        role: 'assistant',
-        content: '⚠️ 请求失败，请确认后端已设置 DEEPSEEK_API_KEY 并重启服务。',
-      }])
+      setMessages(prev => {
+        const updated = [...prev]
+        const last = updated[updated.length - 1]
+        if (last?.role === 'assistant' && last.streaming) {
+          updated[updated.length - 1] = {
+            role: 'assistant',
+            content: '⚠️ 请求失败，请确认后端已设置 DEEPSEEK_API_KEY 并重启服务。',
+            streaming: false,
+          }
+        }
+        return updated
+      })
     } finally {
       setLoading(false)
     }
@@ -48,7 +113,7 @@ export default function JournalAI() {
   async function reindex() {
     setReindexing(true)
     try {
-      await api.journalReindex()
+      await fetch(`${API_BASE}/api/journal/reindex`, { method: 'POST' })
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: '✅ 索引已重建，最新的笔记已经可以搜索了。',
@@ -60,28 +125,46 @@ export default function JournalAI() {
     }
   }
 
+  async function clearSession() {
+    await fetch(`${API_BASE}/api/journal/session/clear`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: SESSION_ID }),
+    }).catch(() => {})
+    setMessages([])
+  }
+
   return (
     <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2">
 
-      {/* Chat panel */}
       {open && (
-        <div className="w-[360px] max-h-[520px] bg-[#12141e] border border-white/10 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+        <div className="w-[380px] max-h-[560px] bg-[#12141e] border border-white/10 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
 
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-[#1a1d2e]">
             <div className="flex items-center gap-2">
               <Bot size={16} className="text-violet-400" />
               <span className="text-sm font-medium text-white">Journal AI</span>
-              <span className="text-[10px] text-slate-500 bg-white/5 px-2 py-0.5 rounded-full">RAG</span>
+              <span className="text-[10px] text-slate-500 bg-white/5 px-2 py-0.5 rounded-full">
+                Agent · Function Calling
+              </span>
             </div>
             <div className="flex items-center gap-2">
               <button
                 onClick={reindex}
                 disabled={reindexing}
-                title="重建索引（添加新笔记后点击）"
+                title="重建索引"
                 className="text-slate-500 hover:text-violet-400 transition-colors disabled:opacity-40"
               >
                 <RotateCcw size={14} className={reindexing ? 'animate-spin' : ''} />
+              </button>
+              <button
+                onClick={clearSession}
+                disabled={loading || messages.length === 0}
+                title="清空对话"
+                className="text-slate-500 hover:text-red-400 transition-colors disabled:opacity-30"
+              >
+                <Trash2 size={14} />
               </button>
               <button onClick={() => setOpen(false)} className="text-slate-500 hover:text-white">
                 <X size={16} />
@@ -116,22 +199,20 @@ export default function JournalAI() {
                     : 'bg-white/5 text-slate-300 rounded-bl-sm border border-white/5'
                 }`}>
                   {m.content}
+                  {m.streaming && m.content === '' && (
+                    <div className="flex gap-1 py-0.5">
+                      {[0,1,2].map(i => (
+                        <span key={i} className="w-1.5 h-1.5 bg-violet-400 rounded-full animate-bounce"
+                          style={{ animationDelay: `${i * 0.15}s` }} />
+                      ))}
+                    </div>
+                  )}
+                  {m.streaming && m.content !== '' && (
+                    <span className="inline-block w-0.5 h-3 bg-violet-400 ml-0.5 animate-pulse" />
+                  )}
                 </div>
               </div>
             ))}
-
-            {loading && (
-              <div className="flex justify-start">
-                <div className="bg-white/5 border border-white/5 rounded-xl rounded-bl-sm px-3 py-2">
-                  <div className="flex gap-1">
-                    {[0,1,2].map(i => (
-                      <span key={i} className="w-1.5 h-1.5 bg-violet-400 rounded-full animate-bounce"
-                        style={{ animationDelay: `${i * 0.15}s` }} />
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
 
             <div ref={bottomRef} />
           </div>
