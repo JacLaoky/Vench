@@ -10,7 +10,7 @@ import atexit
 import time as _time
 import threading
 import collections
-from datetime import datetime
+from datetime import datetime, timedelta
 import sqlite3
 import pandas as pd
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
@@ -194,6 +194,8 @@ def init_db():
     # Example: _add_column_if_missing(conn, 'trades', 'new_col', 'TEXT DEFAULT ""')
     _add_column_if_missing(conn, 'trades', 'tags', "TEXT NOT NULL DEFAULT '[]'")
     _add_column_if_missing(conn, 'trades', 'position_id', "TEXT")
+    _add_column_if_missing(conn, 'trades', 'fee', "REAL NOT NULL DEFAULT 0.0")
+    _add_column_if_missing(conn, 'trades', 'fee_details', "TEXT NOT NULL DEFAULT '[]'")
 
     conn.execute('''
         CREATE TABLE IF NOT EXISTS position_stops (
@@ -393,7 +395,7 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
 
     multiplier  = get_multiplier(ticker_raw)
     trade_value = float(row['price']) * float(row['qty']) * multiplier
-    pct         = (pnl / trade_value * 100) if trade_value > 0 else 0
+    # pct and isProfit computed after fee attribution below (need fee_amount first)
 
     # Compute weighted-average entry price from the BUY/SELL_SHORT legs
     # Used by the frontend for correct R = pnl / (|entry - stop| × qty)
@@ -420,10 +422,48 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
     tags_row = conn.execute(
         'SELECT tags, position_id FROM trades WHERE order_id = ?', (trade_id,)
     ).fetchone()
-    saved_note     = note_row[0] if note_row else ''
-    saved_images   = json.loads(note_row[1]) if note_row else []
-    saved_tags     = json.loads(tags_row[0]) if tags_row and tags_row[0] else []
-    position_id    = tags_row[1] if tags_row and tags_row[1] else None
+    saved_note  = note_row[0] if note_row else ''
+    saved_images = json.loads(note_row[1]) if note_row else []
+    saved_tags  = json.loads(tags_row[0]) if tags_row and tags_row[0] else []
+    position_id = tags_row[1] if tags_row and tags_row[1] else None
+
+    # Fee logic:
+    # - Each partial exit shows only its own closing-order fee.
+    # - The FINAL exit (last close that fully closes the position) also picks up
+    #   ALL entry-leg fees (scale-in buys), since entry costs can't be fairly
+    #   split across individual partial exits.
+    entry_sides = ('BUY', 'SELL_SHORT')
+    close_sides = ('SELL', 'BUY_BACK')
+
+    # Determine if this is the last closing order for this position
+    is_final_close = True  # default for no-position-id fallback
+    if position_id:
+        last_close_row = conn.execute(
+            f'''SELECT order_id FROM trades
+                WHERE position_id = ? AND trd_side IN {close_sides}
+                ORDER BY create_time DESC LIMIT 1''',
+            (position_id,)
+        ).fetchone()
+        is_final_close = last_close_row is not None and last_close_row[0] == trade_id
+
+    # Always include this exit's own fee
+    fee_row     = conn.execute(
+        'SELECT fee, fee_details FROM trades WHERE order_id = ?', (trade_id,)
+    ).fetchone()
+    fee_amount  = float(fee_row[0]) if fee_row and fee_row[0] else 0.0
+    fee_details = json.loads(fee_row[1]) if fee_row and fee_row[1] else []
+
+    # On the final exit: also add all entry-leg fees (scale-in buys)
+    if is_final_close and position_id:
+        entry_fee_rows = conn.execute(
+            f'''SELECT fee, fee_details FROM trades
+                WHERE position_id = ? AND trd_side IN {entry_sides}''',
+            (position_id,)
+        ).fetchall()
+        for r in entry_fee_rows:
+            fee_amount += float(r[0]) if r[0] else 0.0
+            if r[1]:
+                fee_details.extend(json.loads(r[1]))
 
     # Look up stop price for this position
     stop_price = None
@@ -434,6 +474,9 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
         stop_price = stop_row[0] if stop_row else None
     conn.close()
 
+    net_pnl_val = round(pnl - fee_amount, 2)
+    pct         = (net_pnl_val / trade_value * 100) if trade_value > 0 else 0
+
     return {
         "trade_id":     trade_id,
         "day":          exit_time.strftime('%d'),
@@ -442,7 +485,7 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
         "trade_type":   trade_type,
         "pnl":          round(pnl, 2),
         "pct":          f"{int(pct)}%",
-        "isProfit":     pnl >= 0,
+        "isProfit":     net_pnl_val >= 0,
         "transactions": transactions,
         "enter_time":   enter_time.strftime('%a %d %b %I:%M %p'),
         "exit_time":    exit_time.strftime('%a %d %b %I:%M %p'),
@@ -456,6 +499,9 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
         "price":        float(row['price']),
         "qty":          float(row['qty']),
         "entry_price":  round(entry_price, 4),
+        "fee":          round(fee_amount, 4),
+        "fee_details":  fee_details,
+        "net_pnl":      net_pnl_val,
     }
 
 
@@ -492,6 +538,13 @@ def load_df_with_pnl() -> pd.DataFrame:
     df['create_time'] = pd.to_datetime(df['create_time'], format='mixed')
 
     _pnl_cache = calculate_trades_pnl(df)
+    # Compute net P&L per row: realized_pnl minus this order's fee
+    _pnl_cache['fee'] = pd.to_numeric(_pnl_cache['fee'], errors='coerce').fillna(0)
+    _pnl_cache['net_realized_pnl'] = _pnl_cache['realized_pnl'] - _pnl_cache['fee']
+    # Update is_win to reflect net profitability (only on closing trades)
+    _pnl_cache['is_win'] = (
+        (_pnl_cache['net_realized_pnl'] > 0) & (_pnl_cache['realized_pnl'] != 0)
+    )
     print("♻️  PnL cache updated")
     return _pnl_cache.copy()
 
@@ -517,19 +570,21 @@ def slice_by_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
 
 
 def _write_position_pnl():
-    """Write FIFO-accurate pnl per position into position_pnl table for RAG SQL queries."""
+    """Write net pnl (after all fees) per position into position_pnl table for RAG SQL queries."""
     try:
         df = load_df_with_pnl()
-        closed = df[df['realized_pnl'] != 0][
-            ['position_id', 'code', 'realized_pnl', 'is_win', 'create_time']
-        ].copy()
-        if closed.empty:
+        if df.empty or 'net_realized_pnl' not in df.columns:
             return
 
-        # Aggregate by position_id (partial closes → one row per position)
-        agg = closed.groupby('position_id').agg(
+        # Only consider positions that have at least one closed trade
+        closed_pids = df[df['realized_pnl'] != 0]['position_id'].dropna().unique()
+        if len(closed_pids) == 0:
+            return
+
+        # Sum net_realized_pnl over ALL rows per position (includes entry-leg fees)
+        agg = df[df['position_id'].isin(closed_pids)].groupby('position_id').agg(
             code=('code', 'first'),
-            realized_pnl=('realized_pnl', 'sum'),
+            realized_pnl=('net_realized_pnl', 'sum'),   # stored as realized_pnl for schema compat
             open_time=('create_time', 'min'),
             close_time=('create_time', 'max'),
         ).reset_index()
@@ -641,7 +696,8 @@ def sync_trades_to_db() -> bool:
     """Fetch historical filled orders from Moomoo and bulk-insert into SQLite, then clear PnL cache."""
     print("🔄 Syncing historical orders...")
 
-    start_date = "2025-11-01"
+    # Moomoo history_order_list_query 区间不能超过 360 天；旧记录已在库里，INSERT OR IGNORE 不会丢
+    start_date = (datetime.now() - timedelta(days=359)).strftime("%Y-%m-%d")
     end_date   = datetime.now().strftime("%Y-%m-%d")
 
     ret, data = trd_ctx.history_order_list_query(
@@ -674,8 +730,40 @@ def sync_trades_to_db() -> bool:
     )
     saved_count = cursor.rowcount
     conn.commit()
-    conn.close()
 
+    # ── Fetch and store fees for orders not yet populated ──────────────────────
+    order_ids = [r[0] for r in records]
+    unpopulated = [
+        row[0] for row in conn.execute(
+            f"SELECT order_id FROM trades WHERE fee=0 AND order_id IN ({','.join('?'*len(order_ids))})",
+            order_ids
+        ).fetchall()
+    ]
+    if unpopulated:
+        print(f"💰 Querying fees for {len(unpopulated)} orders…")
+        ret_fee, fee_data = trd_ctx.order_fee_query(
+            order_id_list=unpopulated,
+            trd_env=TRD_ENV,
+            acc_id=MOOMOO_ACC_ID,
+        )
+        if ret_fee == RET_OK and not fee_data.empty:
+            fee_updates = []
+            for _, fr in fee_data.iterrows():
+                raw_amount  = fr['fee_amount']
+                fee_amount  = float(raw_amount) if raw_amount != 'N/A' else 0.0
+                fee_details = json.dumps(fr['fee_details']) if fr['fee_details'] else '[]'
+                fee_updates.append((fee_amount, fee_details, str(fr['order_id'])))
+            if fee_updates:
+                conn.executemany(
+                    'UPDATE trades SET fee=?, fee_details=? WHERE order_id=?',
+                    fee_updates
+                )
+                conn.commit()
+                print(f"✅ Fees stored for {len(fee_updates)} orders.")
+        else:
+            print(f"⚠️ Fee query failed or returned empty: {fee_data}")
+
+    conn.close()
     invalidate_cache()
     print(f"Sync complete! {saved_count} new trade records inserted.")
     return True
@@ -994,7 +1082,7 @@ def get_journal_data():
     daily_data = []
     for date_str, grp in df.groupby('date'):
         dt_obj     = datetime.strptime(date_str, '%Y-%m-%d')
-        daily_pnl  = grp['realized_pnl'].sum()
+        daily_pnl  = grp['net_realized_pnl'].sum()
         sells      = grp[grp['trd_side'] == 'SELL']
         sell_count = len(sells)
         wins       = (sells['is_win'] == True).sum()
@@ -1004,7 +1092,7 @@ def get_journal_data():
         ticker_pills = []
         for ticker, g in grp.groupby('code'):
             clean   = ticker.replace('US.', '')
-            grp_pnl = g['realized_pnl'].sum()
+            grp_pnl = g['net_realized_pnl'].sum()
             # Only rows with realized_pnl != 0 (actual closes)
             closes  = g[g['realized_pnl'] != 0].sort_values('create_time', ascending=False)
             cards   = [build_trade_card(row, df) for _, row in closes.iterrows()]
@@ -1034,7 +1122,7 @@ def get_journal_data():
     monthly_data = []
     for month_key, grp in df.groupby('month_sort_key'):
         grp_sorted  = grp.sort_values('create_time')
-        monthly_pnl = grp_sorted['realized_pnl'].sum()
+        monthly_pnl = grp_sorted['net_realized_pnl'].sum()
         sells       = grp_sorted[grp_sorted['trd_side'] == 'SELL']
         sell_count  = len(sells)
         wins        = (sells['is_win'] == True).sum()
@@ -1047,7 +1135,7 @@ def get_journal_data():
 
         for _, r in grp_sorted.iterrows():
             if r['realized_pnl'] != 0:
-                cum_pnl += r['realized_pnl']
+                cum_pnl += r['net_realized_pnl']
                 chart_data.append({
                     "date":  r['create_time'].strftime('%b %d'),
                     "value": round(cum_pnl, 2),
@@ -1084,7 +1172,7 @@ def get_trading_stats():
 
     df = slice_by_period(df_all, period)
 
-    total_pnl   = df['realized_pnl'].sum()
+    total_pnl   = df['net_realized_pnl'].sum()
     sell_orders = df[df['trd_side'] == 'SELL']
     sell_count  = len(sell_orders)
     wins        = (sell_orders['is_win'] == True).sum()
@@ -1095,7 +1183,8 @@ def get_trading_stats():
 
     # Per-position win rate (groups by position_id if available)
     if 'position_id' in df.columns and df['position_id'].notna().any():
-        pos_pnl   = df[df['realized_pnl'] != 0].groupby('position_id')['realized_pnl'].sum()
+        closed_pids = df[df['realized_pnl'] != 0]['position_id'].dropna().unique()
+        pos_pnl   = df[df['position_id'].isin(closed_pids)].groupby('position_id')['net_realized_pnl'].sum()
         pos_wins  = (pos_pnl > 0).sum()
         pos_total = len(pos_pnl)
         _win_rate_num = round(pos_wins / pos_total * 100, 1) if pos_total > 0 else 0.0
@@ -1103,8 +1192,8 @@ def get_trading_stats():
     else:
         win_rate_str = f"{int(wins / sell_count * 100)}%" if sell_count else "0%"
 
-    won_pnl_sum      = sell_orders[sell_orders['is_win'] == True]['realized_pnl'].sum()
-    lost_pnl_sum     = sell_orders[sell_orders['is_win'] == False]['realized_pnl'].sum()
+    won_pnl_sum      = sell_orders[sell_orders['is_win'] == True]['net_realized_pnl'].sum()
+    lost_pnl_sum     = sell_orders[sell_orders['is_win'] == False]['net_realized_pnl'].sum()
     avg_gain_usd     = won_pnl_sum / wins if wins else 0.0
     avg_loss_usd_abs = abs(lost_pnl_sum / losses) if losses else 0.0
     total_avg        = avg_gain_usd + avg_loss_usd_abs
@@ -1126,7 +1215,7 @@ def get_trading_stats():
     # Last-7-days bar chart (today as anchor, 7 days back)
     today         = pd.Timestamp.now().normalize()
     df['_date']   = df['create_time'].dt.strftime('%Y-%m-%d')
-    daily_pnl_map = df.groupby('_date')['realized_pnl'].sum().to_dict()
+    daily_pnl_map = df.groupby('_date')['net_realized_pnl'].sum().to_dict()
 
     last_7_chart = []
     for i in range(6, -1, -1):
@@ -1146,9 +1235,9 @@ def get_trading_stats():
     # Cumulative profit chart
     df_sorted = df.sort_values('create_time').copy()
     df_sorted['_date_only'] = df_sorted['create_time'].dt.date
-    daily_sum  = df_sorted.groupby('_date_only')['realized_pnl'].sum().reset_index()
+    daily_sum  = df_sorted.groupby('_date_only')['net_realized_pnl'].sum().reset_index()
     daily_sum['_date_str'] = pd.to_datetime(daily_sum['_date_only']).dt.strftime('%b %d, %Y')
-    daily_sum['_cum']      = daily_sum['realized_pnl'].cumsum()
+    daily_sum['_cum']      = daily_sum['net_realized_pnl'].cumsum()
 
     if not daily_sum.empty:
         first_date_str = pd.to_datetime(
@@ -1206,7 +1295,7 @@ def get_monthly_details():
         exit_time  = row['create_time']
         ticker     = row['code']
         side       = row['trd_side']
-        pnl        = row['realized_pnl']
+        pnl        = row['net_realized_pnl']   # net (after fee) P&L
         trade_type = "LONG" if side == 'SELL' else "SHORT"
         clean_tick = ticker.split('.')[-1]
 
@@ -1323,18 +1412,18 @@ def get_performance():
     won_df  = sell_orders[sell_orders['is_win'] == True]
     lost_df = sell_orders[sell_orders['is_win'] == False]
 
-    avg_win       = float(won_df['realized_pnl'].mean())  if wins   else 0.0
-    avg_loss      = abs(float(lost_df['realized_pnl'].mean())) if losses else 0.0
-    gross_profit  = float(won_df['realized_pnl'].sum())
-    gross_loss    = abs(float(lost_df['realized_pnl'].sum()))
+    avg_win       = float(won_df['net_realized_pnl'].mean())  if wins   else 0.0
+    avg_loss      = abs(float(lost_df['net_realized_pnl'].mean())) if losses else 0.0
+    gross_profit  = float(won_df['net_realized_pnl'].sum())
+    gross_loss    = abs(float(lost_df['net_realized_pnl'].sum()))
     profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.0
     win_loss_ratio = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0.0
     expectancy    = round((avg_win * win_rate) - (avg_loss * (1 - win_rate)), 2) if sell_count else 0.0
-    total_pnl     = float(df['realized_pnl'].sum())
+    total_pnl     = float(df['net_realized_pnl'].sum())
 
     # ── Max Drawdown ─────────────────────────────────────────────
     df_sorted = df.sort_values('create_time').copy()
-    df_sorted['_cum'] = df_sorted['realized_pnl'].cumsum()
+    df_sorted['_cum'] = df_sorted['net_realized_pnl'].cumsum()
     peak = df_sorted['_cum'].cummax()
     max_drawdown = float((df_sorted['_cum'] - peak).min()) if not df_sorted.empty else 0.0
 
@@ -1354,11 +1443,11 @@ def get_performance():
     # ── Monthly bar chart ────────────────────────────────────────
     df['_month_key'] = df['create_time'].dt.strftime('%Y-%m')
     df['_month_lbl'] = df['create_time'].dt.strftime('%b %Y')
-    monthly_grp = df.groupby(['_month_key', '_month_lbl'])['realized_pnl'].sum().reset_index()
+    monthly_grp = df.groupby(['_month_key', '_month_lbl'])['net_realized_pnl'].sum().reset_index()
     monthly_grp = monthly_grp.sort_values('_month_key')
     monthly_bars = [
-        {"label": str(r['_month_lbl']), "value": round(float(r['realized_pnl']), 2),
-         "isProfit": bool(r['realized_pnl'] >= 0)}
+        {"label": str(r['_month_lbl']), "value": round(float(r['net_realized_pnl']), 2),
+         "isProfit": bool(r['net_realized_pnl'] >= 0)}
         for _, r in monthly_grp.iterrows()
     ]
 
@@ -1370,7 +1459,7 @@ def get_performance():
         grp = sell_orders[sell_orders['_dow'] == i]
         day_wins  = (grp['is_win'] == True).sum()
         day_total = len(grp)
-        day_pnl   = float(grp['realized_pnl'].sum())
+        day_pnl   = float(grp['net_realized_pnl'].sum())
         dow_stats.append({
             "label":    lbl,
             "trades":   int(day_total),
@@ -1402,7 +1491,7 @@ def get_performance():
     for _, row in closed.iterrows():
         exit_time  = row['create_time']
         ticker     = row['code']
-        pnl        = row['realized_pnl']
+        pnl        = row['net_realized_pnl']   # net (after fee)
         trade_type = "LONG"   # sell = close long
         clean_tick = ticker.split('.')[-1]
         mult        = get_multiplier(ticker)
@@ -1424,7 +1513,7 @@ def get_performance():
     for _, row in buy_covers.iterrows():
         exit_time  = row['create_time']
         ticker     = row['code']
-        pnl        = row['realized_pnl']
+        pnl        = row['net_realized_pnl']   # net (after fee)
         clean_tick = ticker.split('.')[-1]
         mult        = get_multiplier(ticker)
         trade_value = float(row['price']) * float(row['qty']) * mult
@@ -1531,7 +1620,7 @@ def get_performance():
         cum = 0.0
         peak = 0.0
         for _, r in df_closed.iterrows():
-            cum  += float(r['realized_pnl'])
+            cum  += float(r['net_realized_pnl'])
             peak  = max(peak, cum)
             dd    = cum - peak          # negative or zero
             equity_pts.append({
@@ -2406,6 +2495,36 @@ def get_holding_trades(ticker):
         stop_price  = stop_map.get(pid_used)
         total_pnl   = float(target_df['realized_pnl'].sum())
 
+        # ── Fetch fees for every order in this position ──────────────────────
+        order_ids   = target_df['order_id'].astype(str).tolist()
+        conn2       = sqlite3.connect(DB_FILE)
+        placeholders = ','.join('?' * len(order_ids))
+        fee_rows    = conn2.execute(
+            f'SELECT order_id, fee, fee_details FROM trades WHERE order_id IN ({placeholders})',
+            order_ids
+        ).fetchall()
+        conn2.close()
+        fee_map     = {r[0]: (float(r[1]) if r[1] else 0.0) for r in fee_rows}
+
+        # Identify the final closing order (last SELL/BUY_BACK by time)
+        close_mask  = target_df['trd_side'].isin(['SELL', 'BUY_BACK'])
+        entry_mask  = target_df['trd_side'].isin(['BUY', 'SELL_SHORT'])
+        final_close_id = None
+        if close_mask.any():
+            final_close_id = str(
+                target_df[close_mask].sort_values('create_time').iloc[-1]['order_id']
+            )
+        total_entry_fee = sum(
+            fee_map.get(str(oid), 0.0)
+            for oid in target_df[entry_mask]['order_id'].astype(str)
+        )
+        total_fee   = sum(fee_map.values()) + (
+            total_entry_fee if final_close_id else 0  # already included via final_close
+        )
+        # total fee = all exit fees + all entry fees (entry fees charged once total)
+        total_all_fees = sum(fee_map.get(str(oid), 0.0) for oid in order_ids)
+        total_net_pnl  = round(total_pnl - total_all_fees, 2)
+
         # Weighted-average entry price from BUY/SELL_SHORT legs
         entry_legs = target_df[target_df['trd_side'].isin(['BUY', 'SELL_SHORT'])]
         entry_qty  = float(entry_legs['qty'].sum())
@@ -2424,29 +2543,41 @@ def get_holding_trades(ticker):
 
         result = []
         for _, row in target_df.iterrows():
-            dt  = pd.to_datetime(row['create_time'])
-            pid = row.get('position_id')
+            dt      = pd.to_datetime(row['create_time'])
+            pid     = row.get('position_id')
+            oid_str = str(row['order_id'])
+            gross   = round(float(row['realized_pnl']), 2)
+            is_close = row['trd_side'] in ('SELL', 'BUY_BACK')
+
+            # Net P&L per row: exit fee always deducted; final exit also carries all entry fees
+            exit_fee = fee_map.get(oid_str, 0.0) if is_close else 0.0
+            extra    = total_entry_fee if (is_close and oid_str == final_close_id) else 0.0
+            net      = round(gross - exit_fee - extra, 2)
+
             result.append({
-                'order_id':     str(row['order_id']),
-                'position_id':  pid,
-                'action':       row['trd_side'],
-                'price':        round(float(row['price']), 4),
-                'qty':          float(row['qty']),
-                'realized_pnl': round(float(row['realized_pnl']), 2),
-                'date':         dt.strftime('%Y-%m-%d'),
-                'time':         dt.strftime('%H:%M'),
-                'day':          dt.strftime('%d'),
-                'month':        dt.strftime('%b').upper(),
-                'stop_price':   stop_map.get(pid),
+                'order_id':         oid_str,
+                'position_id':      pid,
+                'action':           row['trd_side'],
+                'price':            round(float(row['price']), 4),
+                'qty':              float(row['qty']),
+                'realized_pnl':     gross,
+                'net_realized_pnl': net,
+                'fee':              round(exit_fee + extra, 4),
+                'date':             dt.strftime('%Y-%m-%d'),
+                'time':             dt.strftime('%H:%M'),
+                'day':              dt.strftime('%d'),
+                'month':            dt.strftime('%b').upper(),
+                'stop_price':       stop_map.get(pid),
             })
 
         return jsonify({
-            'status':       'success',
-            'data':         result,
-            'total_pnl':    round(total_pnl, 2),
-            'entry_price':  round(entry_price, 4),
-            'stop_price':   stop_price,
-            'r_multiple':   r_multiple,
+            'status':         'success',
+            'data':           result,
+            'total_pnl':      round(total_pnl, 2),
+            'total_net_pnl':  total_net_pnl,
+            'entry_price':    round(entry_price, 4),
+            'stop_price':     stop_price,
+            'r_multiple':     r_multiple,
         }), 200
 
     except Exception as e:

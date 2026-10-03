@@ -13,6 +13,7 @@ interface Trade {
   holding_time: string; entry_price: number; price: number; qty: number
   note: string; tags: string[]; transactions: Transaction[]
   isProfit: boolean; month: string
+  fee: number; fee_details: [string, number][]; net_pnl: number
 }
 interface MonthEntry {
   label: string; value: number; isProfit: boolean; trades: number
@@ -58,7 +59,7 @@ export default function Journal() {
           if (!monthMap[mo]) monthMap[mo] = { pnl: 0, trades: 0 }
           for (const ticker of day.tickers ?? []) {
             for (const trade of ticker.trades ?? []) {
-              monthMap[mo].pnl += trade.pnl
+              monthMap[mo].pnl += (trade.net_pnl ?? trade.pnl)  // use net (after-fee) P&L
               monthMap[mo].trades += 1
             }
           }
@@ -196,8 +197,8 @@ export default function Journal() {
                   }`}>
                   <div className="flex justify-between items-start">
                     <span className="font-medium text-white text-sm">{t.ticker}</span>
-                    <span className={`text-sm font-medium ${t.isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {t.isProfit ? '+' : '-'}${Math.abs(t.pnl).toFixed(2)}
+                    <span className={`text-sm font-medium ${(t.net_pnl ?? t.pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {(t.net_pnl ?? t.pnl) >= 0 ? '+' : '-'}${Math.abs(t.net_pnl ?? t.pnl).toFixed(2)}
                     </span>
                   </div>
                   <div className="flex justify-between mt-1">
@@ -227,8 +228,8 @@ export default function Journal() {
                   <div className="flex items-center gap-3 mb-1">
                     <h2 className="text-lg font-semibold text-white">{selected.ticker}</h2>
                     <span className="text-xs px-2 py-0.5 rounded-full bg-white/10 text-slate-400">{selected.trade_type}</span>
-                    <span className={`text-lg font-semibold ${selected.isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
-                      {selected.isProfit ? '+' : '-'}${Math.abs(selected.pnl).toFixed(2)} ({selected.pct})
+                    <span className={`text-lg font-semibold ${(selected.net_pnl ?? selected.pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                      {(selected.net_pnl ?? selected.pnl) >= 0 ? '+' : '-'}${Math.abs(selected.net_pnl ?? selected.pnl).toFixed(2)} ({selected.pct})
                     </span>
                   </div>
                   <p className="text-xs text-slate-500 mb-4">{selected.enter_time} → {selected.exit_time} · {selected.holding_time}</p>
@@ -242,6 +243,27 @@ export default function Journal() {
                         <span className="text-slate-500 text-xs">{tx.date}</span>
                       </div>
                     ))}
+                    {/* Fee summary */}
+                    {(selected.fee ?? 0) > 0 && (
+                      <div className="mt-2 pt-2 border-t border-white/5 space-y-1">
+                        <div className="flex justify-between text-sm">
+                          <span className="text-slate-500">Commission</span>
+                          <span className="text-red-400">-${(selected.fee).toFixed(2)}</span>
+                        </div>
+                        {selected.fee_details?.map(([title, val], i) => (
+                          <div key={i} className="flex justify-between text-xs text-slate-600">
+                            <span className="pl-2">{title}</span>
+                            <span>-${(val as number).toFixed(2)}</span>
+                          </div>
+                        ))}
+                        <div className="flex justify-between text-sm font-medium pt-1 border-t border-white/5">
+                          <span className="text-slate-400">Net P&L</span>
+                          <span className={selected.net_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}>
+                            {selected.net_pnl >= 0 ? '+' : '-'}${Math.abs(selected.net_pnl).toFixed(2)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {selected.tags?.length > 0 && (

@@ -281,10 +281,13 @@ class _PositionGroupCardState extends State<_PositionGroupCard> {
 
   @override
   Widget build(BuildContext context) {
-    // Sum all realized P&L in this position group
+    // Sum net P&L (after fees) across all exits in this position group.
+    // net_pnl on each card already deducts that card's exit fee; the final
+    // exit card also carries all entry-leg fees — so summing net_pnl gives
+    // the true after-commission result for the whole position.
     double totalPnl = 0;
     for (final t in widget.trades) {
-      totalPnl += (t['pnl'] as num).toDouble();
+      totalPnl += ((t['net_pnl'] ?? t['pnl']) as num).toDouble();
     }
     final isProfit = totalPnl >= 0;
     final pnlColor = isProfit ? AppColors.green : AppColors.red;

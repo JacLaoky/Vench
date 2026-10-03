@@ -78,7 +78,8 @@ class _AllTradesScreenState extends State<AllTradesScreen> {
 
     // Step 2: filter at position level
     var result = allGroups.where((group) {
-      final totalPnl = group.fold<double>(0, (s, t) => s + (t['pnl'] as num).toDouble());
+      final totalPnl = group.fold<double>(
+          0, (s, t) => s + ((t['net_pnl'] ?? t['pnl']) as num).toDouble());
 
       // 2a. Symbol search: any order in group matches
       if (_searchQuery.isNotEmpty) {
@@ -87,7 +88,7 @@ class _AllTradesScreenState extends State<AllTradesScreen> {
         if (!matches) return false;
       }
 
-      // 2b. P&L filter: based on position total P&L
+      // 2b. P&L filter: based on position total net P&L
       if (_pnlFilter == 'win'  && totalPnl <= 0) return false;
       if (_pnlFilter == 'loss' && totalPnl >= 0) return false;
 
@@ -125,15 +126,15 @@ class _AllTradesScreenState extends State<AllTradesScreen> {
     switch (_sortMode) {
       case 'pnl_desc':
         result.sort((a, b) {
-          final pa = a.fold<double>(0, (s, t) => s + (t['pnl'] as num).toDouble());
-          final pb = b.fold<double>(0, (s, t) => s + (t['pnl'] as num).toDouble());
+          final pa = a.fold<double>(0, (s, t) => s + ((t['net_pnl'] ?? t['pnl']) as num).toDouble());
+          final pb = b.fold<double>(0, (s, t) => s + ((t['net_pnl'] ?? t['pnl']) as num).toDouble());
           return pb.compareTo(pa);
         });
         break;
       case 'pnl_asc':
         result.sort((a, b) {
-          final pa = a.fold<double>(0, (s, t) => s + (t['pnl'] as num).toDouble());
-          final pb = b.fold<double>(0, (s, t) => s + (t['pnl'] as num).toDouble());
+          final pa = a.fold<double>(0, (s, t) => s + ((t['net_pnl'] ?? t['pnl']) as num).toDouble());
+          final pb = b.fold<double>(0, (s, t) => s + ((t['net_pnl'] ?? t['pnl']) as num).toDouble());
           return pa.compareTo(pb);
         });
         break;
@@ -408,7 +409,7 @@ class _AllTradesScreenState extends State<AllTradesScreen> {
     int wins = 0;
     double totalPnl = 0;
     for (final g in positions) {
-      final pnl = g.fold<double>(0, (s, t) => s + (t['pnl'] as num).toDouble());
+      final pnl = g.fold<double>(0, (s, t) => s + ((t['net_pnl'] ?? t['pnl']) as num).toDouble());
       totalPnl += pnl;
       if (pnl > 0) wins++;
     }
@@ -475,8 +476,8 @@ class _PositionGroupCardState extends State<_PositionGroupCard> {
 
   @override
   Widget build(BuildContext context) {
-    final double totalPnl = widget.trades
-        .fold(0.0, (s, t) => s + (t['pnl'] as num).toDouble());
+    final double totalPnl = widget.trades.fold(
+        0.0, (s, t) => s + ((t['net_pnl'] ?? t['pnl']) as num).toDouble());
     final bool isProfit  = totalPnl >= 0;
     final Color pnlColor = isProfit ? AppColors.green : AppColors.red;
     final String pnlStr  = totalPnl == 0

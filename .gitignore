@@ -11,6 +11,10 @@ venv/
 backend/*.db
 backend/test.py
 backend/trade_images/
+backend/chroma_db/
+
+# macOS
+.DS_Store
 
 # Node
 web/node_modules/

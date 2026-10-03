@@ -93,9 +93,10 @@ class TradeCardWidget extends StatelessWidget {
     final String month = trade['month'];
     final String rawTicker = trade['ticker'];
     final String tradeType = trade['trade_type'] ?? 'LONG';
-    final double pnl = (trade['pnl'] as num).toDouble();
+    final double grossPnl = (trade['pnl'] as num).toDouble();
+    final double pnl      = (trade['net_pnl'] as num?)?.toDouble() ?? grossPnl;
     final String pct = trade['pct'];
-    final bool isProfit = trade['isProfit'];
+    final bool isProfit = pnl >= 0;
 
     // Position / stop / R multiple
     final String? positionId = trade['position_id'] as String?;

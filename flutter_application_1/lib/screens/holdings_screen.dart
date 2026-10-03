@@ -243,14 +243,10 @@ class _HoldingCard extends StatelessWidget {
     // Current price ≈ market_val / qty
     final curPrice = qty > 0 ? mktVal / qty : 0.0;
 
-    // Unrealized R = (cur - entry) / (entry - stop)
-    double? rMultiple;
-    if (stopPrice != null && stopPrice > 0 && cost > 0 && curPrice > 0) {
-      final risk = (cost - stopPrice).abs();
-      if (risk > 0.001) {
-        rMultiple = (curPrice - cost) / (cost - stopPrice);
-      }
-    }
+    // R is NOT shown in the holdings list — Moomoo's cost_price is a blended
+    // historical average and doesn't reflect the real entry for the current position.
+    // R is displayed in OpenPositionScreen where accurate entry_price is fetched
+    // from the backend trades endpoint.
 
     final initial = ticker.isNotEmpty ? ticker[0] : '?';
 
@@ -385,10 +381,6 @@ class _HoldingCard extends StatelessWidget {
                             'Today $todaySign\$${todayPnl.abs().toStringAsFixed(2)}',
                             style: TextStyle(color: todayColor, fontSize: 11),
                           ),
-                          if (rMultiple != null) ...[
-                            const SizedBox(height: 4),
-                            _RBadge(r: rMultiple),
-                          ],
                           const SizedBox(height: 4),
                           if (stopPrice != null)
                             GestureDetector(

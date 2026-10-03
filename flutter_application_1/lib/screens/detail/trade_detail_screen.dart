@@ -240,15 +240,18 @@ class _TradeDetailScreenState extends State<TradeDetailScreen> {
       }
     }
     final String ticker     = widget.trade['ticker'];
-    final double pnl        = (widget.trade['pnl'] as num).toDouble();
+    final double grossPnl   = (widget.trade['pnl'] as num).toDouble();
+    final double pnl        = (widget.trade['net_pnl'] as num?)?.toDouble() ?? grossPnl;
     final String pct        = widget.trade['pct'];
-    final bool   isProfit   = widget.trade['isProfit'];
+    final bool   isProfit   = pnl >= 0;
     final String tradeType  = widget.trade['trade_type'];
     final String enterTime  = widget.trade['enter_time']  ?? 'N/A';
     final String exitTime   = widget.trade['exit_time']   ?? 'N/A';
     final String holdingTime= widget.trade['holding_time']?? 'N/A';
     final String tradeCount = widget.trade['trade_count'] ?? '0';
     final List<dynamic> transactions = widget.trade['transactions'] ?? [];
+    final double fee        = (widget.trade['fee'] as num?)?.toDouble() ?? 0.0;
+    final List<dynamic> feeDetails = widget.trade['fee_details'] as List? ?? [];
 
     final colorText = isProfit ? AppColors.green : AppColors.red;
     final String pnlText = pnl > 0 ? '+\$${pnl.toStringAsFixed(2)}' : '-\$${pnl.abs().toStringAsFixed(2)}';
@@ -297,9 +300,46 @@ class _TradeDetailScreenState extends State<TradeDetailScreen> {
                   )),
                   const Divider(color: Color(0xFF2C2C2E), height: 30),
                   Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
-                    Text('Net gain', style: TextStyle(color: AppColors.text, fontSize: 14)),
-                    Text(pnlText, style: TextStyle(color: AppColors.text, fontSize: 14, fontWeight: FontWeight.bold)),
+                    Text('Gross P&L', style: TextStyle(color: AppColors.text, fontSize: 14)),
+                    Text(
+                      grossPnl >= 0 ? '+\$${grossPnl.toStringAsFixed(2)}' : '-\$${grossPnl.abs().toStringAsFixed(2)}',
+                      style: TextStyle(color: AppColors.text, fontSize: 14, fontWeight: FontWeight.bold),
+                    ),
                   ]),
+                  if (fee > 0) ...[
+                    const SizedBox(height: 8),
+                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                      Text('Commission', style: TextStyle(color: AppColors.dim, fontSize: 14)),
+                      Text('-\$${fee.toStringAsFixed(2)}', style: const TextStyle(color: AppColors.red, fontSize: 14)),
+                    ]),
+                    // Fee breakdown
+                    ...feeDetails.map((item) {
+                      final title = item is List ? item[0].toString() : '';
+                      final val   = item is List ? (item[1] as num).toDouble() : 0.0;
+                      return Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                          Padding(
+                            padding: const EdgeInsets.only(left: 12),
+                            child: Text(title, style: TextStyle(color: AppColors.dim, fontSize: 12)),
+                          ),
+                          Text('-\$${val.toStringAsFixed(2)}', style: TextStyle(color: AppColors.dim, fontSize: 12)),
+                        ]),
+                      );
+                    }),
+                    const Divider(color: Color(0xFF2C2C2E), height: 20),
+                    Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                      Text('Net P&L', style: TextStyle(color: AppColors.text, fontSize: 14, fontWeight: FontWeight.bold)),
+                      Text(
+                        pnl >= 0 ? '+\$${pnl.toStringAsFixed(2)}' : '-\$${pnl.abs().toStringAsFixed(2)}',
+                        style: TextStyle(
+                          color: pnl >= 0 ? AppColors.green : AppColors.red,
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ]),
+                  ],
                 ]),
               ),
               const SizedBox(height: 30),

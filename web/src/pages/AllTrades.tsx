@@ -8,6 +8,7 @@ interface Trade {
   enter_time: string; exit_time: string; holding_time: string
   entry_price: number; price: number; qty: number
   note: string; tags: string[]
+  fee: number; net_pnl: number
 }
 
 type SortKey = 'exit_time' | 'pnl' | 'ticker'
@@ -32,13 +33,13 @@ export default function AllTrades() {
   const filtered = useMemo(() => {
     let list = trades
     if (query) list = list.filter(t => t.ticker.toLowerCase().includes(query.toLowerCase()))
-    if (filter === 'win') list = list.filter(t => t.isProfit)
-    if (filter === 'loss') list = list.filter(t => !t.isProfit)
+    if (filter === 'win') list = list.filter(t => (t.net_pnl ?? t.pnl) >= 0)
+    if (filter === 'loss') list = list.filter(t => (t.net_pnl ?? t.pnl) < 0)
     if (filter === 'long') list = list.filter(t => t.trade_type === 'LONG')
     if (filter === 'short') list = list.filter(t => t.trade_type === 'SHORT')
     return [...list].sort((a, b) => {
       let cmp = 0
-      if (sort === 'pnl') cmp = a.pnl - b.pnl
+      if (sort === 'pnl') cmp = (a.net_pnl ?? a.pnl) - (b.net_pnl ?? b.pnl)
       else if (sort === 'ticker') cmp = a.ticker.localeCompare(b.ticker)
       else cmp = a.exit_time.localeCompare(b.exit_time)
       return sortAsc ? cmp : -cmp
@@ -120,10 +121,10 @@ export default function AllTrades() {
                   <td className="text-right px-4 py-2.5 text-slate-300">${t.entry_price.toFixed(2)}</td>
                   <td className="text-right px-4 py-2.5 text-slate-300">${t.price.toFixed(2)}</td>
                   <td className="text-right px-4 py-2.5 text-slate-400">{t.qty}</td>
-                  <td className={`text-right px-4 py-2.5 font-medium ${t.isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {t.isProfit ? '+' : ''}${t.pnl.toFixed(2)}
+                  <td className={`text-right px-4 py-2.5 font-medium ${(t.net_pnl ?? t.pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {(t.net_pnl ?? t.pnl) >= 0 ? '+' : ''}${Math.abs(t.net_pnl ?? t.pnl).toFixed(2)}
                   </td>
-                  <td className={`text-right px-4 py-2.5 text-xs ${t.isProfit ? 'text-emerald-400' : 'text-red-400'}`}>{t.pct}</td>
+                  <td className={`text-right px-4 py-2.5 text-xs ${(t.net_pnl ?? t.pnl) >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>{t.pct}</td>
                   <td className="text-right px-4 py-2.5 text-slate-500 text-xs">{t.holding_time}</td>
                   <td className="px-4 py-2.5">
                     <div className="flex gap-1 flex-wrap">

@@ -45,6 +45,7 @@ class _OpenPositionScreenState extends State<OpenPositionScreen> {
 
   // Fields from backend response
   double?  _backendTotalPnl;
+  double?  _backendTotalNetPnl;
   double?  _backendEntryPrice;
   double?  _backendStopPrice;
   double?  _rMultiple;
@@ -67,9 +68,10 @@ class _OpenPositionScreenState extends State<OpenPositionScreen> {
       if (res.statusCode == 200) {
         final d = json.decode(res.body);
         setState(() {
-          _trades            = d['data']        as List?   ?? [];
-          _backendTotalPnl   = (d['total_pnl']   as num?)?.toDouble();
-          _backendEntryPrice = (d['entry_price']  as num?)?.toDouble();
+          _trades            = d['data']           as List?   ?? [];
+          _backendTotalPnl    = (d['total_pnl']     as num?)?.toDouble();
+          _backendTotalNetPnl = (d['total_net_pnl'] as num?)?.toDouble();
+          _backendEntryPrice  = (d['entry_price']   as num?)?.toDouble();
           _backendStopPrice  = (d['stop_price']   as num?)?.toDouble();
           _rMultiple         = (d['r_multiple']   as num?)?.toDouble();
           _isLoading         = false;
@@ -218,29 +220,34 @@ class _OpenPositionScreenState extends State<OpenPositionScreen> {
       ]);
     } else {
       // ── Closed position: show realized P&L from trades ──
-      final totalPnl   = _backendTotalPnl ?? 0.0;
-      final pnlColor   = totalPnl >= 0 ? AppColors.green : AppColors.red;
+      final totalNetPnl  = _backendTotalNetPnl ?? _backendTotalPnl ?? 0.0;
+      final totalGrossPnl = _backendTotalPnl ?? 0.0;
+      final totalFee     = (totalGrossPnl - totalNetPnl).abs() > 0.001
+          ? totalGrossPnl - totalNetPnl
+          : 0.0;
+      final pnlColor     = totalNetPnl >= 0 ? AppColors.green : AppColors.red;
 
       return _HeaderCard(children: [
         _HeaderTopRow(
           ticker:    widget.ticker,
           name:      widget.name ?? widget.ticker,
           rMultiple: _rMultiple,
-          rightTop:  _fmt(totalPnl, sign: true),
+          rightTop:  _fmt(totalNetPnl, sign: true),
           rightSub:  'Realized P&L',
           rightColor: pnlColor,
         ),
-        if (_backendEntryPrice != null || _backendStopPrice != null) ...[
-          const SizedBox(height: 14),
-          Divider(color: AppColors.border, height: 1),
-          const SizedBox(height: 14),
-          Row(children: [
-            if (_backendEntryPrice != null)
-              _Stat('Avg Entry', '\$${_backendEntryPrice!.toStringAsFixed(2)}'),
-            if (_backendStopPrice != null)
-              _Stat('Stop', '\$${_backendStopPrice!.toStringAsFixed(2)}'),
-          ]),
-        ],
+        const SizedBox(height: 14),
+        Divider(color: AppColors.border, height: 1),
+        const SizedBox(height: 14),
+        Row(children: [
+          if (_backendEntryPrice != null)
+            _Stat('Avg Entry', '\$${_backendEntryPrice!.toStringAsFixed(2)}'),
+          if (_backendStopPrice != null)
+            _Stat('Stop', '\$${_backendStopPrice!.toStringAsFixed(2)}'),
+          if (totalFee > 0)
+            _Stat('Commission', '-\$${totalFee.toStringAsFixed(2)}',
+                color: AppColors.red),
+        ]),
       ]);
     }
   }
@@ -427,7 +434,7 @@ class _TradeRow extends StatelessWidget {
     final day     = trade['day']   as String;
     final month   = trade['month'] as String;
     final time    = trade['time']  as String;
-    final pnl     = (trade['realized_pnl']  as num).toDouble();
+    final pnl     = ((trade['net_realized_pnl'] ?? trade['realized_pnl']) as num).toDouble();
 
     final isBuy   = action == 'BUY' || action == 'BUY_BACK';
     final actionColor = isBuy ? AppColors.green : AppColors.red;

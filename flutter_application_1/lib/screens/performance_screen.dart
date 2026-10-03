@@ -664,6 +664,7 @@ class _PerformanceScreenState extends State<PerformanceScreen> {
 
     return GridView.builder(
       shrinkWrap: true, physics: const NeverScrollableScrollPhysics(),
+      padding: EdgeInsets.zero,
       gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: 3, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.25),
       itemCount: metrics.length,

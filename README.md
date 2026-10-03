@@ -34,7 +34,7 @@ Personal trading journal and analytics platform with a Flask REST API, React web
 ```
 Vench/
 ├── backend/
-│   ├── app.py            # Flask app — all 25 API routes, PnL engine, rate limiter, caching
+│   ├── app.py            # Flask app — 32 API routes, PnL engine, rate limiter, caching
 │   ├── rag.py            # Journal AI — Function Calling Agent, SSE streaming, session memory
 │   ├── etfs.json         # Sector / theme ETF definitions
 │   └── .env              # Secrets (not committed)
@@ -142,7 +142,7 @@ MIT
 ```
 Vench/
 ├── backend/
-│   ├── app.py            # Flask 主程序 — 全部 25 个 API 路由、PnL 引擎、限速器、缓存
+│   ├── app.py            # Flask 主程序 — 全部 32 个 API 路由、PnL 引擎、限速器、缓存
 │   ├── rag.py            # Journal AI — Function Calling Agent、SSE 流式输出、session 记忆
 │   ├── etfs.json         # 板块 / 主题 ETF 配置
 │   └── .env              # 密钥（不提交）
