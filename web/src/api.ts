@@ -19,6 +19,6 @@ export const api = {
   saveDailyNote: (date: string, note: string) => http.post(`/daily_notes/${date}`, { note }).then(r => r.data),
   getNote: (tradeId: string) => http.get(`/notes/${tradeId}`).then(r => r.data),
   saveNote: (tradeId: string, note: string) => http.post(`/notes/${tradeId}`, { note }).then(r => r.data),
-  sync: () => http.get('/sync').then(r => r.data),
+  sync: () => http.post('/sync').then(r => r.data),
   journalReindex: () => http.post('/journal/reindex').then(r => r.data),
 }

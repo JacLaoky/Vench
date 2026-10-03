@@ -17,9 +17,14 @@ from flask import Flask, request, jsonify, send_from_directory, Response, stream
 from flask_cors import CORS
 from moomoo import *
 from flask import Response, stream_with_context  # re-import after moomoo to avoid shadowing
+from datetime import datetime, timedelta  # re-import: `from moomoo import *` shadows datetime
+import positions as P
 
 app = Flask(__name__)
-CORS(app)
+# Only our own web front-ends may call the API from a browser (comma-separated origins)
+CORS(app, origins=[o.strip() for o in os.environ.get('CORS_ORIGINS', 'http://localhost:5173').split(',') if o.strip()])
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
+ALLOWED_IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
 
 # ======================== ⚙️ Configuration ========================
 MOOMOO_ACC_ID = int(os.environ.get('MOOMOO_ACC_ID', '0'))
@@ -206,18 +211,44 @@ def init_db():
         )
     ''')
 
+    # initial_stop is locked at the first stop ever set (defines 1R); stop_price is the current stop
+    _add_column_if_missing(conn, 'position_stops', 'initial_stop', 'REAL')
+    conn.execute('UPDATE position_stops SET initial_stop = stop_price WHERE initial_stop IS NULL')
+
+    # Broker-reconciled closes: after this order the broker shows the ticker flat even though the
+    # order history leaves a small residue (fractional shares moved outside of orders)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS position_resets (
+            order_id    TEXT PRIMARY KEY,
+            code        TEXT NOT NULL,
+            residue     REAL NOT NULL,
+            created_at  TEXT NOT NULL
+        )
+    ''')
+
+    # position_pnl is fully derived (rebuilt on every sync) — recreate it when the schema is old
+    pnl_cols = {row[1] for row in conn.execute('PRAGMA table_info(position_pnl)')}
+    if pnl_cols and 'status' not in pnl_cols:
+        conn.execute('DROP VIEW IF EXISTS ticker_pnl')
+        conn.execute('DROP TABLE position_pnl')
     conn.execute('''
         CREATE TABLE IF NOT EXISTS position_pnl (
             position_id  TEXT PRIMARY KEY,
             code         TEXT NOT NULL,
+            direction    TEXT NOT NULL,
+            status       TEXT NOT NULL,
             realized_pnl REAL NOT NULL,
-            is_win       INTEGER NOT NULL,
+            is_win       INTEGER,
+            entry_qty    REAL NOT NULL,
+            avg_entry    REAL NOT NULL,
+            initial_stop REAL,
+            r_multiple   REAL,
             open_time    TEXT,
             close_time   TEXT
         )
     ''')
 
-    # ticker_pnl: per-ticker net P&L view (use this for ranking/win-rate questions)
+    # ticker_pnl: per-ticker net P&L over closed positions (use this for ranking/win-rate questions)
     conn.execute('''
         CREATE VIEW IF NOT EXISTS ticker_pnl AS
         SELECT
@@ -230,8 +261,17 @@ def init_db():
             ROUND(MIN(realized_pnl), 2)           AS worst_position,
             ROUND(SUM(is_win)*100.0/COUNT(*), 1)  AS win_rate_pct
         FROM position_pnl
+        WHERE status = 'closed'
         GROUP BY code
     ''')
+
+    # Legacy tables from an earlier design: never written by this code — drop them while empty
+    for legacy in ('positions', 'journal_entries'):
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (legacy,)
+        ).fetchone()
+        if exists and conn.execute(f'SELECT COUNT(*) FROM {legacy}').fetchone()[0] == 0:
+            conn.execute(f'DROP TABLE {legacy}')
 
     conn.commit()
     conn.close()
@@ -240,62 +280,43 @@ def init_db():
 init_db()
 
 
-def assign_position_ids(conn=None):
+def load_resets(conn) -> set:
+    return {r[0] for r in conn.execute('SELECT order_id FROM position_resets')}
+
+
+def assign_position_ids():
+    """Assign every fill to its position (id = first order_id of the position, see positions.py).
+    Stops saved against an older id follow their position to the new id.
     """
-    Process all trades chronologically per ticker.
-    When qty crosses zero (new position opens), assign a new position_id.
-    Format: '{TICKER}_{seq}' e.g. 'NVDA_3'
-    Updates the position_id column in the trades table.
-    """
-    should_close = conn is None
-    if conn is None:
-        conn = sqlite3.connect(DB_FILE)
-
-    rows = conn.execute(
-        'SELECT order_id, code, trd_side, qty, create_time FROM trades ORDER BY create_time ASC'
-    ).fetchall()
-
-    position_qty = {}   # ticker -> running qty
-    position_seq = {}   # ticker -> sequence counter
-    position_cur = {}   # ticker -> current position_id
-
-    updates = []
-    for order_id, code, side, qty, create_time in rows:
-        ticker = code
-        qty    = float(qty)
-
-        prev_qty = position_qty.get(ticker, 0.0)
-
-        # Compute new running qty
-        # BUY / BUY_BACK both add shares; SELL / SELL_SHORT both subtract
-        if side in ('BUY', 'BUY_BACK'):
-            new_qty = prev_qty + qty
-        else:  # SELL, SELL_SHORT
-            new_qty = prev_qty - qty
-
-        # Snap to zero if floating point near-zero
-        if abs(new_qty) < 0.001:
-            new_qty = 0.0
-
-        # New position starts when previous qty was 0 and now non-zero
-        if abs(prev_qty) < 0.001 and abs(new_qty) >= 0.001:
-            seq = position_seq.get(ticker, 0) + 1
-            position_seq[ticker]  = seq
-            position_cur[ticker]  = f'{ticker}_{seq}'
-
-        position_qty[ticker] = new_qty
-        updates.append((position_cur.get(ticker), order_id))
-
-    conn.executemany('UPDATE trades SET position_id=? WHERE order_id=?', updates)
-    conn.commit()
-
-    if should_close:
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql_query(
+        'SELECT order_id, code, trd_side, qty, create_time, position_id AS old_id FROM trades', conn
+    )
+    if df.empty:
         conn.close()
+        return
+    df['qty'] = pd.to_numeric(df['qty'])
+    df['create_time'] = pd.to_datetime(df['create_time'], format='mixed')
+    df['position_id'] = P.assign_cycles(df, load_resets(conn))
 
-    print(f'[positions] assigned position_ids to {len(updates)} trades')
+    moved = (
+        df[df['old_id'].notna() & (df['old_id'] != df['position_id'])]
+        .groupby('old_id')['position_id'].first().to_dict()
+    )
+    for old_id, new_id in moved.items():
+        conn.execute(
+            'UPDATE OR IGNORE position_stops SET position_id=? WHERE position_id=?', (new_id, old_id)
+        )
+    conn.executemany(
+        'UPDATE trades SET position_id=? WHERE order_id=?',
+        list(zip(df['position_id'], df['order_id'])),
+    )
+    conn.commit()
+    conn.close()
+    invalidate_cache()
+    print(f'[positions] {df["position_id"].nunique()} positions over {len(df)} fills; '
+          f'{len(moved)} position ids migrated')
 
-
-assign_position_ids()
 
 # ======================== Moomoo Connection ========================
 trd_ctx   = OpenSecTradeContext(filter_trdmarket=TrdMarket.US,
@@ -309,10 +330,7 @@ atexit.register(lambda: (trd_ctx.close(), quote_ctx.close()))
 
 # ======================== 🛠️ Utilities ========================
 
-def get_multiplier(code: str) -> float:
-    """Auto-detect options multiplier: ticker with digits → options (×100), else stock (×1)."""
-    clean = code.split('.')[-1]
-    return 100.0 if any(c.isdigit() for c in clean) else 1.0
+get_multiplier = P.multiplier
 
 
 def fmt_holding(delta) -> str:
@@ -465,14 +483,20 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
             if r[1]:
                 fee_details.extend(json.loads(r[1]))
 
-    # Look up stop price for this position
-    stop_price = None
-    if position_id:
-        stop_row = conn.execute(
-            'SELECT stop_price FROM position_stops WHERE position_id=?', (position_id,)
-        ).fetchone()
-        stop_price = stop_row[0] if stop_row else None
     conn.close()
+
+    # Position-level facts (stops, status, R) come from the position engine
+    stop_price = initial_stop = position_r = None
+    position_status = None
+    if position_id:
+        pos = load_positions()
+        match = pos[pos['position_id'] == position_id] if not pos.empty else pos
+        if not match.empty:
+            p = match.iloc[0]
+            stop_price      = None if pd.isna(p['stop_price']) else float(p['stop_price'])
+            initial_stop    = None if pd.isna(p['initial_stop']) else float(p['initial_stop'])
+            position_status = p['status']
+            position_r      = p['r_multiple']
 
     net_pnl_val = round(pnl - fee_amount, 2)
     pct         = (net_pnl_val / trade_value * 100) if trade_value > 0 else 0
@@ -496,6 +520,9 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
         "tags":         saved_tags,
         "position_id":  position_id,
         "stop_price":   stop_price,
+        "initial_stop": initial_stop,
+        "position_status": position_status,
+        "r_multiple":   position_r if is_final_close and position_status == 'closed' else None,
         "price":        float(row['price']),
         "qty":          float(row['qty']),
         "entry_price":  round(entry_price, 4),
@@ -507,14 +534,57 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
 
 # ======================== Data Access Layer (with cache) ========================
 
-# Module-level PnL cache: avoids recomputing on every API request
+# Module-level caches: avoid recomputing on every API request
 _pnl_cache: pd.DataFrame | None = None
+_positions_cache: pd.DataFrame | None = None
 
 
 def invalidate_cache():
-    """Call after syncing data to clear the PnL cache."""
-    global _pnl_cache
+    """Call after syncing data or editing stops to clear the derived caches."""
+    global _pnl_cache, _positions_cache
     _pnl_cache = None
+    _positions_cache = None
+
+
+def now_et() -> pd.Timestamp:
+    """Current US/Eastern wall-clock time, naive — trade times from Moomoo are naive Eastern."""
+    return pd.Timestamp.now(tz='America/New_York').tz_localize(None)
+
+
+def load_positions() -> pd.DataFrame:
+    """One row per position (open and closed) with net P&L, initial/current stop and R multiple."""
+    global _positions_cache
+    if _positions_cache is not None:
+        return _positions_cache.copy()
+
+    df = load_df_with_pnl()
+    if df.empty:
+        return pd.DataFrame()
+    conn = sqlite3.connect(DB_FILE)
+    resets = load_resets(conn)
+    stops = pd.read_sql_query(
+        'SELECT position_id, stop_price, initial_stop FROM position_stops', conn
+    )
+    conn.close()
+
+    summary = P.summarize(df, resets).merge(stops, on='position_id', how='left')
+    summary['r_multiple'] = [
+        P.r_multiple(r.net_pnl, r.avg_entry, r.initial_stop, r.entry_qty, r.multiplier)
+        for r in summary.itertuples()
+    ]
+    summary['is_win'] = summary['net_pnl'] > 0
+    _positions_cache = summary
+    return summary.copy()
+
+
+def closed_positions(period: str = 'AT') -> pd.DataFrame:
+    """Closed positions whose close time falls in the period — the unit for win rate/expectancy."""
+    pos = load_positions()
+    if pos.empty:
+        return pos
+    closed = pos[pos['status'] == 'closed'].copy()
+    closed['create_time'] = closed['close_time']   # slice_by_period filters on create_time
+    return slice_by_period(closed, period).sort_values('close_time')
 
 
 def load_df_with_pnl() -> pd.DataFrame:
@@ -537,21 +607,18 @@ def load_df_with_pnl() -> pd.DataFrame:
     df['qty']         = pd.to_numeric(df['qty'])
     df['create_time'] = pd.to_datetime(df['create_time'], format='mixed')
 
+    df['fee'] = pd.to_numeric(df['fee'], errors='coerce').fillna(0)
     _pnl_cache = calculate_trades_pnl(df)
-    # Compute net P&L per row: realized_pnl minus this order's fee
-    _pnl_cache['fee'] = pd.to_numeric(_pnl_cache['fee'], errors='coerce').fillna(0)
+    # Net P&L per fill: realized_pnl minus this order's own fee (entry fees land on entry fills)
     _pnl_cache['net_realized_pnl'] = _pnl_cache['realized_pnl'] - _pnl_cache['fee']
-    # Update is_win to reflect net profitability (only on closing trades)
-    _pnl_cache['is_win'] = (
-        (_pnl_cache['net_realized_pnl'] > 0) & (_pnl_cache['realized_pnl'] != 0)
-    )
+    _pnl_cache['is_win'] = (_pnl_cache['net_realized_pnl'] > 0) & (_pnl_cache['realized_pnl'] != 0)
     print("♻️  PnL cache updated")
     return _pnl_cache.copy()
 
 
 def slice_by_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
     """Slice a PnL DataFrame by the given period parameter."""
-    now = pd.Timestamp.now()
+    now = now_et()
 
     offsets = {
         '1W':  pd.DateOffset(weeks=1),
@@ -570,46 +637,36 @@ def slice_by_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
 
 
 def _write_position_pnl():
-    """Write net pnl (after all fees) per position into position_pnl table for RAG SQL queries."""
+    """Persist every position (open and closed) to position_pnl for the Journal AI's SQL tool.
+    realized_pnl is net of all fees; is_win is only set once a position is closed.
+    """
     try:
-        df = load_df_with_pnl()
-        if df.empty or 'net_realized_pnl' not in df.columns:
+        pos = load_positions()
+        if pos.empty:
             return
-
-        # Only consider positions that have at least one closed trade
-        closed_pids = df[df['realized_pnl'] != 0]['position_id'].dropna().unique()
-        if len(closed_pids) == 0:
-            return
-
-        # Sum net_realized_pnl over ALL rows per position (includes entry-leg fees)
-        agg = df[df['position_id'].isin(closed_pids)].groupby('position_id').agg(
-            code=('code', 'first'),
-            realized_pnl=('net_realized_pnl', 'sum'),   # stored as realized_pnl for schema compat
-            open_time=('create_time', 'min'),
-            close_time=('create_time', 'max'),
-        ).reset_index()
-        agg['is_win'] = (agg['realized_pnl'] > 0).astype(int)
-
         conn = sqlite3.connect(DB_FILE)
         conn.execute("DELETE FROM position_pnl")
         conn.executemany(
-            "INSERT INTO position_pnl (position_id, code, realized_pnl, is_win, open_time, close_time) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT INTO position_pnl (position_id, code, direction, status, realized_pnl, is_win, "
+            "entry_qty, avg_entry, initial_stop, r_multiple, open_time, close_time) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
-                    row['position_id'],
-                    row['code'],
-                    round(float(row['realized_pnl']), 2),
-                    int(row['is_win']),
-                    str(row['open_time']),
-                    str(row['close_time']),
+                    r.position_id, r.code, r.direction, r.status,
+                    round(float(r.net_pnl), 2),
+                    int(r.net_pnl > 0) if r.status == 'closed' else None,
+                    float(r.entry_qty), round(float(r.avg_entry), 4),
+                    None if pd.isna(r.initial_stop) else float(r.initial_stop),
+                    r.r_multiple,
+                    str(r.open_time),
+                    None if pd.isna(r.close_time) else str(r.close_time),
                 )
-                for _, row in agg.iterrows()
+                for r in pos.itertuples()
             ]
         )
         conn.commit()
         conn.close()
-        print(f"[position_pnl] written {len(agg)} positions")
+        print(f"[position_pnl] written {len(pos)} positions ({(pos['status'] == 'closed').sum()} closed)")
     except Exception as e:
         print(f"[position_pnl] write failed: {e}")
 
@@ -617,91 +674,28 @@ def _write_position_pnl():
 # ======================== 🧮 Core Financial Algorithms ========================
 
 def calculate_trades_pnl(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Advanced moving-average cost basis (supports long/short and options multiplier).
-    Annotates each row with realized_pnl and is_win, then returns the DataFrame.
-    """
-    df = df.sort_values('create_time').copy()
-
-    positions  = {}
-    pnl_list   = []
-    is_win_list = []
-
-    for _, row in df.iterrows():
-        ticker = row['code']
-        side   = row['trd_side']
-        price  = float(row['price'])
-        qty    = float(row['qty'])
-        mult   = get_multiplier(ticker)
-
-        pos = positions.setdefault(ticker, {'qty': 0.0, 'avg_cost': 0.0})
-        realized_pnl = 0.0
-        cur_qty  = pos['qty']
-        cur_cost = pos['avg_cost']
-
-        if side == 'BUY':
-            if cur_qty >= 0:                          # long entry / add to long
-                new_qty        = cur_qty + qty
-                pos['avg_cost'] = (cur_qty * cur_cost + qty * price) / new_qty
-                pos['qty']      = new_qty
-            else:                                     # short exit (buy to cover)
-                cover      = min(qty, abs(cur_qty))
-                realized_pnl = (cur_cost - price) * cover * mult
-                remaining  = qty - cover
-                if remaining > 0:
-                    pos['qty']      = remaining
-                    pos['avg_cost'] = price
-                else:
-                    pos['qty'] = cur_qty + qty
-                    if pos['qty'] == 0:
-                        pos['avg_cost'] = 0.0
-
-        elif side == 'SELL':
-            if cur_qty <= 0:                          # short entry / add to short
-                new_abs        = abs(cur_qty) + qty
-                pos['avg_cost'] = (abs(cur_qty) * cur_cost + qty * price) / new_abs
-                pos['qty']      = cur_qty - qty
-            else:                                     # long exit (sell to close)
-                sell_qty     = min(qty, cur_qty)
-                realized_pnl = (price - cur_cost) * sell_qty * mult
-                remaining    = qty - sell_qty
-                if remaining > 0:
-                    pos['qty']      = -remaining
-                    pos['avg_cost'] = price
-                else:
-                    pos['qty'] = cur_qty - qty
-                    if pos['qty'] == 0:
-                        pos['avg_cost'] = 0.0
-
-        pnl_list.append(realized_pnl)
-        is_win_list.append(realized_pnl > 0 if realized_pnl != 0 else False)
-
-    df['realized_pnl'] = pnl_list
-    df['is_win']       = is_win_list
+    """Per-fill gross realized P&L (moving-average cost, longs and shorts) — see positions.py."""
+    conn = sqlite3.connect(DB_FILE)
+    resets = load_resets(conn)
+    conn.close()
+    df = P.realized_pnl(df, resets)
+    df['is_win'] = df['realized_pnl'] > 0
     return df
 
 
 # ======================== Moomoo Data Fetch ========================
 
-def sync_positions() -> list:
-    ret, data = trd_ctx.position_list_query(trd_env=TRD_ENV, acc_id=MOOMOO_ACC_ID)
-    if ret == RET_OK:
-        print("Positions fetched successfully")
-        return data[['code', 'qty', 'cost_price', 'val', 'pl_ratio']].to_dict(orient='records')
-    print(f"Failed to fetch positions: {data}")
-    return []
-
-
 def sync_trades_to_db() -> bool:
-    """Fetch historical filled orders from Moomoo and bulk-insert into SQLite, then clear PnL cache."""
+    """Pull filled orders from Moomoo into SQLite (upsert), refresh fees, reconcile residues."""
     print("🔄 Syncing historical orders...")
 
-    # Moomoo history_order_list_query 区间不能超过 360 天；旧记录已在库里，INSERT OR IGNORE 不会丢
+    # history_order_list_query rejects ranges longer than 360 days; older fills are already stored
     start_date = (datetime.now() - timedelta(days=359)).strftime("%Y-%m-%d")
     end_date   = datetime.now().strftime("%Y-%m-%d")
 
+    # CANCELLED_PART = partly filled, then cancelled: its fills are real and must not be dropped
     ret, data = trd_ctx.history_order_list_query(
-        status_filter_list=[OrderStatus.FILLED_ALL, OrderStatus.FILLED_PART],
+        status_filter_list=[OrderStatus.FILLED_ALL, OrderStatus.FILLED_PART, OrderStatus.CANCELLED_PART],
         trd_env=TRD_ENV,
         acc_id=MOOMOO_ACC_ID,
         start=start_date,
@@ -715,34 +709,46 @@ def sync_trades_to_db() -> bool:
         print("⚠️ No historical orders found")
         return True
 
-    # Bulk insert with executemany + OR IGNORE (much faster than row-by-row)
+    data = data[data['dealt_qty'].astype(float) > 0]
+    # updated_time ≈ fill time; create_time is when the order was placed (a GTC stop can fill weeks later)
     records = [
         (str(r['order_id']), r['code'], r['trd_side'],
-         float(r['dealt_avg_price']), float(r['dealt_qty']), r['create_time'])
+         float(r['dealt_avg_price']), float(r['dealt_qty']), r['updated_time'] or r['create_time'])
         for _, r in data.iterrows()
     ]
 
-    conn   = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.executemany(
-        'INSERT OR IGNORE INTO trades (order_id, code, trd_side, price, qty, create_time) VALUES (?,?,?,?,?,?)',
+    conn = sqlite3.connect(DB_FILE)
+    before = {
+        oid: (qty, price, t) for oid, qty, price, t in
+        conn.execute('SELECT order_id, qty, price, create_time FROM trades')
+    }
+    conn.executemany(
+        """INSERT INTO trades (order_id, code, trd_side, price, qty, create_time) VALUES (?,?,?,?,?,?)
+           ON CONFLICT(order_id) DO UPDATE SET
+               price = excluded.price, qty = excluded.qty, create_time = excluded.create_time""",
         records
     )
-    saved_count = cursor.rowcount
+    inserted = [r[0] for r in records if r[0] not in before]
+    changed = [
+        r[0] for r in records
+        if r[0] in before and (abs(before[r[0]][0] - r[4]) > 1e-9 or abs(before[r[0]][1] - r[3]) > 1e-9)
+    ]
+    retimed = sum(1 for r in records if r[0] in before and before[r[0]][2] != r[5])
     conn.commit()
 
-    # ── Fetch and store fees for orders not yet populated ──────────────────────
+    # Fees: new orders, orders whose fill changed, and any still missing a fee
     order_ids = [r[0] for r in records]
-    unpopulated = [
+    missing = [
         row[0] for row in conn.execute(
             f"SELECT order_id FROM trades WHERE fee=0 AND order_id IN ({','.join('?'*len(order_ids))})",
             order_ids
         ).fetchall()
     ]
-    if unpopulated:
-        print(f"💰 Querying fees for {len(unpopulated)} orders…")
+    need_fee = sorted(set(missing) | set(changed))
+    if need_fee:
+        print(f"💰 Querying fees for {len(need_fee)} orders…")
         ret_fee, fee_data = trd_ctx.order_fee_query(
-            order_id_list=unpopulated,
+            order_id_list=need_fee,
             trd_env=TRD_ENV,
             acc_id=MOOMOO_ACC_ID,
         )
@@ -753,20 +759,164 @@ def sync_trades_to_db() -> bool:
                 fee_amount  = float(raw_amount) if raw_amount != 'N/A' else 0.0
                 fee_details = json.dumps(fr['fee_details']) if fr['fee_details'] else '[]'
                 fee_updates.append((fee_amount, fee_details, str(fr['order_id'])))
-            if fee_updates:
-                conn.executemany(
-                    'UPDATE trades SET fee=?, fee_details=? WHERE order_id=?',
-                    fee_updates
-                )
-                conn.commit()
-                print(f"✅ Fees stored for {len(fee_updates)} orders.")
+            conn.executemany('UPDATE trades SET fee=?, fee_details=? WHERE order_id=?', fee_updates)
+            conn.commit()
+            print(f"✅ Fees stored for {len(fee_updates)} orders.")
         else:
             print(f"⚠️ Fee query failed or returned empty: {fee_data}")
 
+    _reconcile_residues(conn)
     conn.close()
     invalidate_cache()
-    print(f"Sync complete! {saved_count} new trade records inserted.")
+    print(f"Sync complete! {len(inserted)} new, {len(changed)} updated, {retimed} re-timed to fill time.")
     return True
+
+
+def _reconcile_residues(conn) -> None:
+    """If the broker shows a ticker flat but the order history leaves less than one share
+    (fractional shares moved outside of orders), close the position after its last fill.
+    Larger gaps are left open on purpose — they mean fills are missing and should be visible.
+    """
+    ret, held = trd_ctx.position_list_query(trd_env=TRD_ENV, acc_id=MOOMOO_ACC_ID)
+    if ret != RET_OK:
+        print(f"⚠️ Residue check skipped, position query failed: {held}")
+        return
+    held_qty = {r['code']: float(r['qty']) for _, r in held.iterrows()} if not held.empty else {}
+
+    rows = conn.execute(
+        'SELECT order_id, code, trd_side, qty FROM trades ORDER BY create_time, order_id'
+    ).fetchall()
+    resets = load_resets(conn)
+    running, last_order = {}, {}
+    for oid, code, side, qty in rows:
+        running[code] = 0.0 if oid in resets else running.get(code, 0.0) + P.signed_qty(side, float(qty))
+        last_order[code] = oid
+
+    for code, qty in running.items():
+        if P.EPS <= abs(qty) < 1 and abs(held_qty.get(code, 0.0)) < P.EPS:
+            conn.execute(
+                'INSERT OR IGNORE INTO position_resets (order_id, code, residue, created_at) VALUES (?,?,?,?)',
+                (last_order[code], code, qty, datetime.now().isoformat())
+            )
+            print(f"🔧 {code}: broker is flat but orders leave {qty:+.4f} — position closed after {last_order[code]}")
+    conn.commit()
+
+
+
+# ======================== 📊 Per-position statistics ========================
+
+def _fmt_usd(v):
+    return "$0.00" if pd.isna(v) else f"{'-' if v < 0 else ''}${abs(v):.2f}"
+
+
+def _fmt_pct(v):
+    return "0.00%" if pd.isna(v) else f"{v * 100:.2f}%"
+
+
+def _fmt_time(s):
+    if pd.isna(s): return "0s"
+    if s < 60:     return "a few seconds"
+    if s < 3600:   return f"{int(s / 60)}m"
+    if s < 86400:  return f"{int(s / 3600)}h"
+    return f"{int(s / 86400)}d"
+
+
+def _fmt_hour(h):
+    if pd.isna(h): return "0:00"
+    return f"{int(h):02d}:{int((h - int(h)) * 60):02d}"
+
+
+def deep_stats(cp: pd.DataFrame) -> dict:
+    """Gain/loss, long/short, timing, best/worst and per-symbol breakdown over closed positions."""
+    df_t = pd.DataFrame({
+        'pnl':         cp['net_pnl'].astype(float),
+        'pct':         (cp['net_pnl'] / cp['entry_cost'].where(cp['entry_cost'] > 0)).fillna(0.0),
+        'is_win':      cp['is_win'].astype(bool),
+        'type':        cp['direction'],
+        'holding_sec': (cp['close_time'] - cp['open_time']).dt.total_seconds(),
+        'entry_hour':  cp['open_time'].dt.hour + cp['open_time'].dt.minute / 60.0,
+        'symbol':      cp['code'].str.split('.').str[-1],
+    }) if not cp.empty else pd.DataFrame(
+        columns=['pnl', 'pct', 'is_win', 'type', 'holding_sec', 'entry_hour', 'symbol'])
+    won_t  = df_t[df_t['is_win'] == True]
+    lost_t = df_t[df_t['is_win'] == False]
+
+    symbol_stats = []
+    for sym, grp in df_t.groupby('symbol'):
+        w = grp[grp['is_win'] == True]
+        l = grp[grp['is_win'] == False]
+        sym_pnl = float(grp['pnl'].sum())
+        symbol_stats.append({
+            "symbol": str(sym),
+            "trades": {"all": str(len(grp)), "won": str(len(w)), "lost": str(len(l))},
+            "amount": {
+                "all":  _fmt_usd(sym_pnl),
+                "won":  _fmt_usd(float(w['pnl'].sum())) if not w.empty else "$0.00",
+                "lost": _fmt_usd(float(l['pnl'].sum())) if not l.empty else "$0.00",
+            },
+            "pnl_raw":      round(sym_pnl, 2),
+            "isProfit":     bool(sym_pnl >= 0),
+            "_raw_trades":  int(len(grp)),
+            "_raw_pnl_abs": abs(sym_pnl),
+        })
+
+    return {
+        "gain_loss": {
+            "total":    {"all": _fmt_usd(df_t['pnl'].sum()),  "won": _fmt_usd(won_t['pnl'].sum()),  "lost": _fmt_usd(lost_t['pnl'].sum())},
+            "avg_usd":  {"all": _fmt_usd(df_t['pnl'].mean()), "won": _fmt_usd(won_t['pnl'].mean()), "lost": _fmt_usd(lost_t['pnl'].mean())},
+            "avg_pct":  {"all": _fmt_pct(df_t['pct'].mean()), "won": _fmt_pct(won_t['pct'].mean()), "lost": _fmt_pct(lost_t['pct'].mean())},
+            "trades":   {"all": str(len(df_t)), "won": str(len(won_t)), "lost": str(len(lost_t))},
+            "win_rate": _fmt_pct(len(won_t) / len(df_t) if len(df_t) else 0),
+        },
+        "long_short": {
+            "long":  {"all": str((df_t['type'] == 'LONG').sum()),  "won": str((won_t['type'] == 'LONG').sum()),  "lost": str((lost_t['type'] == 'LONG').sum())},
+            "short": {"all": str((df_t['type'] == 'SHORT').sum()), "won": str((won_t['type'] == 'SHORT').sum()), "lost": str((lost_t['type'] == 'SHORT').sum())},
+        },
+        "timing": {
+            "holding":    {"all": _fmt_time(df_t['holding_sec'].mean()), "won": _fmt_time(won_t['holding_sec'].mean()), "lost": _fmt_time(lost_t['holding_sec'].mean())},
+            "entry_hour": {"all": _fmt_hour(df_t['entry_hour'].mean()),  "won": _fmt_hour(won_t['entry_hour'].mean()),  "lost": _fmt_hour(lost_t['entry_hour'].mean())},
+        },
+        "best_worst": {
+            "largest_usd": {"won": _fmt_usd(won_t['pnl'].max() if not won_t.empty else 0), "lost": _fmt_usd(lost_t['pnl'].min() if not lost_t.empty else 0)},
+            "largest_pct": {"won": _fmt_pct(won_t['pct'].max() if not won_t.empty else 0), "lost": _fmt_pct(lost_t['pct'].min() if not lost_t.empty else 0)},
+        },
+        "symbols_by_trades": sorted(symbol_stats, key=lambda x: x['_raw_trades'], reverse=True),
+        "symbols_by_amount": sorted(symbol_stats, key=lambda x: x['pnl_raw'],     reverse=True),
+    }
+
+
+R_BUCKETS = [(-float('inf'), -2, '≤ -2R'), (-2, -1, '-2R ~ -1R'), (-1, 0, '-1R ~ 0'),
+             (0, 1, '0 ~ 1R'), (1, 2, '1R ~ 2R'), (2, 3, '2R ~ 3R'), (3, float('inf'), '≥ 3R')]
+
+
+def r_stats(cp: pd.DataFrame) -> dict:
+    """Expectancy and distribution in R, over closed positions that have an initial stop."""
+    rs = cp['r_multiple'].dropna().astype(float) if not cp.empty else pd.Series(dtype=float)
+    if rs.empty:
+        return {"count": 0, "coverage": f"0/{len(cp)}", "expectancy_r": None,
+                "avg_win_r": None, "avg_loss_r": None, "total_r": None, "distribution": []}
+    wins, losses = rs[rs > 0], rs[rs <= 0]
+    return {
+        "count":        int(len(rs)),
+        "coverage":     f"{len(rs)}/{len(cp)}",
+        "expectancy_r": round(float(rs.mean()), 2),
+        "avg_win_r":    round(float(wins.mean()), 2) if len(wins) else None,
+        "avg_loss_r":   round(float(losses.mean()), 2) if len(losses) else None,
+        "total_r":      round(float(rs.sum()), 2),
+        "distribution": [
+            {"label": label, "count": int(((rs > lo) & (rs <= hi)).sum()) if lo != -float('inf') else int((rs <= hi).sum())}
+            for lo, hi, label in R_BUCKETS
+        ],
+    }
+
+
+def daily_pnl_series(df: pd.DataFrame) -> pd.Series:
+    """Net realized P&L per business day across the period, including flat days (zeros)."""
+    if df.empty:
+        return pd.Series(dtype=float)
+    daily = df.groupby(df['create_time'].dt.normalize())['net_realized_pnl'].sum()
+    days = pd.bdate_range(daily.index.min(), daily.index.max())
+    return daily.reindex(days.union(daily.index), fill_value=0.0)
 
 
 # ======================== API Routes ========================
@@ -811,45 +961,18 @@ def get_portfolio():
         # Sort by market value descending
         rows.sort(key=lambda x: x['market_val'], reverse=True)
 
-        # Enrich with position_id + stop_price from local DB
+        # Enrich with the open position's id and stops from the position engine
         if rows:
-            conn_db = sqlite3.connect(DB_FILE)
-            ticker_list = [r['ticker'] for r in rows]
-            placeholders = ','.join('?' * len(ticker_list))
-
-            # Pull all trades for these tickers to find open position_ids
-            df_trades = pd.read_sql(
-                f"""SELECT trd_side, qty, position_id,
-                           UPPER(REPLACE(code, 'US.', '')) AS ticker_clean
-                    FROM trades
-                    WHERE UPPER(REPLACE(code, 'US.', '')) IN ({placeholders})
-                    ORDER BY create_time ASC""",
-                conn_db, params=ticker_list
-            )
-
-            # Pull all stop prices at once
-            stops_raw = conn_db.execute(
-                f"""SELECT position_id, stop_price FROM position_stops
-                    WHERE UPPER(REPLACE(ticker, 'US.', '')) IN ({placeholders})""",
-                ticker_list
-            ).fetchall()
-            conn_db.close()
-            stop_map = {r[0]: r[1] for r in stops_raw}
-
-            # Find open position_id per ticker
-            open_pid_map = {}  # ticker → position_id
-            if not df_trades.empty:
-                for (tkr, pid), grp in df_trades.groupby(['ticker_clean', 'position_id']):
-                    buy_qty  = grp[grp['trd_side'].isin(['BUY',  'BUY_BACK'])]['qty'].sum()
-                    sell_qty = grp[grp['trd_side'].isin(['SELL', 'SELL_SHORT'])]['qty'].sum()
-                    if buy_qty - sell_qty > 0.001:
-                        open_pid_map[tkr] = pid  # last open pid wins
-
+            pos = load_positions()
+            open_pos = {}
+            if not pos.empty:
+                for r in pos[pos['status'] == 'open'].sort_values('open_time').itertuples():
+                    open_pos[r.code.replace('US.', '').upper()] = r
             for row in rows:
-                tkr = row['ticker'].upper()
-                pid = open_pid_map.get(tkr)
-                row['position_id'] = pid
-                row['stop_price']  = stop_map.get(pid) if pid else None
+                op = open_pos.get(row['ticker'].upper())
+                row['position_id']  = op.position_id if op else None
+                row['stop_price']   = None if not op or pd.isna(op.stop_price) else float(op.stop_price)
+                row['initial_stop'] = None if not op or pd.isna(op.initial_stop) else float(op.initial_stop)
 
         return jsonify({"status": "success", "data": rows}), 200
     except Exception as e:
@@ -857,7 +980,7 @@ def get_portfolio():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route('/api/sync', methods=['GET'])
+@app.route('/api/sync', methods=['POST'])
 def trigger_sync():
     global _last_sync_time
     import time
@@ -907,33 +1030,44 @@ def update_trade_tags(trade_id):
 
 @app.route('/api/positions/<position_id>/stop', methods=['PATCH'])
 def set_position_stop(position_id):
+    """Set the current stop. The first stop ever set becomes the initial stop (defines 1R) and is
+    not changed by later moves; pass `initial_stop` explicitly only to correct it.
+    """
     body       = request.get_json(force=True)
     stop_price = float(body.get('stop_price', 0))
     ticker     = body.get('ticker', '')
+    initial    = body.get('initial_stop')
 
     conn = sqlite3.connect(DB_FILE)
     conn.execute('''
-        INSERT INTO position_stops (position_id, ticker, stop_price, updated_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO position_stops (position_id, ticker, stop_price, initial_stop, updated_at)
+        VALUES (?, ?, ?, COALESCE(?, ?), ?)
         ON CONFLICT(position_id) DO UPDATE SET
-            stop_price = excluded.stop_price,
-            updated_at = excluded.updated_at
-    ''', (position_id, ticker, stop_price, datetime.now().isoformat()))
+            stop_price   = excluded.stop_price,
+            initial_stop = COALESCE(?, position_stops.initial_stop, excluded.stop_price),
+            updated_at   = excluded.updated_at
+    ''', (position_id, ticker, stop_price, initial, stop_price, datetime.now().isoformat(), initial))
+    row = conn.execute(
+        'SELECT stop_price, initial_stop FROM position_stops WHERE position_id=?', (position_id,)
+    ).fetchone()
     conn.commit()
     conn.close()
-    return jsonify({'status': 'success', 'position_id': position_id, 'stop_price': stop_price}), 200
+    invalidate_cache()
+    _write_position_pnl()
+    return jsonify({'status': 'success', 'position_id': position_id,
+                    'stop_price': row[0], 'initial_stop': row[1]}), 200
 
 
 @app.route('/api/positions/<position_id>/stop', methods=['GET'])
 def get_position_stop(position_id):
     conn = sqlite3.connect(DB_FILE)
     row  = conn.execute(
-        'SELECT stop_price FROM position_stops WHERE position_id=?', (position_id,)
+        'SELECT stop_price, initial_stop FROM position_stops WHERE position_id=?', (position_id,)
     ).fetchone()
     conn.close()
     if row:
-        return jsonify({'status': 'success', 'stop_price': row[0]}), 200
-    return jsonify({'status': 'not_found', 'stop_price': None}), 200
+        return jsonify({'status': 'success', 'stop_price': row[0], 'initial_stop': row[1]}), 200
+    return jsonify({'status': 'not_found', 'stop_price': None, 'initial_stop': None}), 200
 
 
 @app.route('/api/tags', methods=['GET'])
@@ -958,63 +1092,29 @@ def get_tag_stats():
     """Tag performance analytics. Supports timeframe: 1W, 1M, 3M, 1Y, AT (default)."""
     timeframe = request.args.get('timeframe', 'AT').upper()
 
-    # Load PnL-annotated dataframe (uses module-level cache)
-    df_all = load_df_with_pnl()
-    if df_all.empty:
-        return jsonify({'status': 'success', 'timeframe': timeframe, 'data': []}), 200
-
-    # Only closed trades (realized_pnl != 0) have meaningful PnL
-    df = df_all[df_all['realized_pnl'] != 0].copy()
-
-    # Apply timeframe filter based on create_time
-    from datetime import timedelta
-    if timeframe != 'AT':
-        offsets = {
-            '1W':  timedelta(days=7),
-            '1M':  timedelta(days=30),
-            '3M':  timedelta(days=90),
-            '1Y':  timedelta(days=365),
-        }
-        delta = offsets.get(timeframe)
-        if delta:
-            cutoff = pd.Timestamp.now() - delta
-            df = df[df['create_time'] >= cutoff].copy()
-
-    if df.empty:
-        return jsonify({'status': 'success', 'timeframe': timeframe, 'data': []}), 200
-
-    # Fetch tags for trades in scope
-    order_ids = df['order_id'].tolist()
-    if not order_ids:
+    # One sample per closed position (net of fees), tagged with every tag on any of its fills
+    closed = closed_positions(timeframe)
+    if closed.empty:
         return jsonify({'status': 'success', 'timeframe': timeframe, 'data': []}), 200
 
     conn = sqlite3.connect(DB_FILE)
-    placeholders = ','.join('?' * len(order_ids))
     tag_rows = conn.execute(
-        f"SELECT order_id, tags FROM trades "
-        f"WHERE order_id IN ({placeholders}) "
-        f"AND tags IS NOT NULL AND tags != '' AND tags != '[]'",
-        order_ids
+        "SELECT position_id, tags FROM trades WHERE tags IS NOT NULL AND tags NOT IN ('', '[]')"
     ).fetchall()
     conn.close()
-
-    # Build a map: order_id -> tags list
-    tags_map = {}
-    for (oid, tags_str) in tag_rows:
+    tags_by_position: dict[str, set] = {}
+    for pid, tags_str in tag_rows:
         try:
-            tags_map[str(oid)] = json.loads(tags_str)
+            tags_by_position.setdefault(pid, set()).update(json.loads(tags_str))
         except Exception:
             pass
 
-    # Accumulate per-tag stats
     tag_stats = {}  # tag -> {pnls: [], wins: int, losses: int}
-
-    for _, row in df.iterrows():
-        oid = str(row['order_id'])
-        tags = tags_map.get(oid, [])
+    for pos in closed.itertuples():
+        tags = tags_by_position.get(pos.position_id)
         if not tags:
             continue
-        pnl = float(row['realized_pnl'])
+        pnl = float(pos.net_pnl)
         for tag in tags:
             if tag not in tag_stats:
                 tag_stats[tag] = {'pnls': [], 'wins': 0, 'losses': 0}
@@ -1078,15 +1178,24 @@ def get_journal_data():
     df['date']           = df['create_time'].dt.strftime('%Y-%m-%d')
     df['month_sort_key'] = df['create_time'].dt.strftime('%Y-%m')
 
+    # Wins/losses count positions that closed on that day/month (not individual sell orders)
+    cp = closed_positions('AT')
+    closed_by_day   = cp.groupby(cp['close_time'].dt.strftime('%Y-%m-%d'))['is_win'] if not cp.empty else None
+    closed_by_month = cp.groupby(cp['close_time'].dt.strftime('%Y-%m'))['is_win'] if not cp.empty else None
+
+    def _win_loss(groups, key):
+        if groups is None or key not in groups.groups:
+            return 0, 0
+        g = groups.get_group(key)
+        return int(g.sum()), int(len(g) - g.sum())
+
     # --- Group by day ---
     daily_data = []
     for date_str, grp in df.groupby('date'):
         dt_obj     = datetime.strptime(date_str, '%Y-%m-%d')
         daily_pnl  = grp['net_realized_pnl'].sum()
-        sells      = grp[grp['trd_side'] == 'SELL']
-        sell_count = len(sells)
-        wins       = (sells['is_win'] == True).sum()
-        win_pct    = f"{int(wins / sell_count * 100)}%" if sell_count else "0%"
+        wins, losses = _win_loss(closed_by_day, date_str)
+        win_pct    = f"{int(wins / (wins + losses) * 100)}%" if wins + losses else "0%"
 
         # Per ticker: bundle all closing trades for that day into a trade card list
         ticker_pills = []
@@ -1111,8 +1220,8 @@ def get_journal_data():
             "winPct":   win_pct,
             "trades":   str(len(grp)),
             "wins":     str(wins),
-            "losses":   str(sell_count - wins),
-            "comm":     "$0.00",
+            "losses":   str(losses),
+            "comm":     f"${grp['fee'].sum():.2f}",
             "tickers":  ticker_pills,
         })
 
@@ -1123,10 +1232,10 @@ def get_journal_data():
     for month_key, grp in df.groupby('month_sort_key'):
         grp_sorted  = grp.sort_values('create_time')
         monthly_pnl = grp_sorted['net_realized_pnl'].sum()
-        sells       = grp_sorted[grp_sorted['trd_side'] == 'SELL']
-        sell_count  = len(sells)
-        wins        = (sells['is_win'] == True).sum()
-        win_pct     = f"{int(wins / sell_count * 100)}%" if sell_count else "0%"
+        wins, losses = _win_loss(closed_by_month, month_key)
+        win_pct     = f"{int(wins / (wins + losses) * 100)}%" if wins + losses else "0%"
+        month_cp    = cp[cp['close_time'].dt.strftime('%Y-%m') == month_key] if not cp.empty else cp
+        month_wins  = month_cp[month_cp['is_win']]['net_pnl'] if not cp.empty else []
 
         year, month = map(int, month_key.split('-'))
         month_start = datetime(year, month, 1).strftime('%b %d')
@@ -1149,7 +1258,7 @@ def get_journal_data():
             "monthYear": grp_sorted['create_time'].iloc[0].strftime('%B, %Y'),
             "profit":    f"{'-' if monthly_pnl < 0 else ''}${abs(monthly_pnl):.2f}",
             "wins":      win_pct,
-            "avgGain":   "N/A",
+            "avgGain":   f"${month_wins.mean():.2f}" if len(month_wins) else "N/A",
             "chart_data": chart_data,
             "isProfit":  bool(monthly_pnl >= 0),
         })
@@ -1171,49 +1280,39 @@ def get_trading_stats():
         return jsonify({"status": "empty", "message": "No trade data yet"}), 200
 
     df = slice_by_period(df_all, period)
+    total_pnl = df['net_realized_pnl'].sum()
 
-    total_pnl   = df['net_realized_pnl'].sum()
-    sell_orders = df[df['trd_side'] == 'SELL']
-    sell_count  = len(sell_orders)
-    wins        = (sell_orders['is_win'] == True).sum()
-    losses      = sell_count - wins
+    # Trade statistics are per closed position (net of every fill's fees)
+    cp     = closed_positions(period)
+    n_pos  = len(cp)
+    won    = cp[cp['is_win']] if n_pos else cp
+    lost   = cp[~cp['is_win']] if n_pos else cp
+    wins, losses = len(won), len(lost)
 
-    win_loss_split = ([wins / sell_count, losses / sell_count]
-                      if sell_count else [0.0, 1.0])
+    win_loss_split = [wins / n_pos, losses / n_pos] if n_pos else [0.0, 1.0]
+    win_rate_str   = f"{int(wins / n_pos * 100)}%" if n_pos else "0%"
 
-    # Per-position win rate (groups by position_id if available)
-    if 'position_id' in df.columns and df['position_id'].notna().any():
-        closed_pids = df[df['realized_pnl'] != 0]['position_id'].dropna().unique()
-        pos_pnl   = df[df['position_id'].isin(closed_pids)].groupby('position_id')['net_realized_pnl'].sum()
-        pos_wins  = (pos_pnl > 0).sum()
-        pos_total = len(pos_pnl)
-        _win_rate_num = round(pos_wins / pos_total * 100, 1) if pos_total > 0 else 0.0
-        win_rate_str  = f"{int(_win_rate_num)}%"
-    else:
-        win_rate_str = f"{int(wins / sell_count * 100)}%" if sell_count else "0%"
-
-    won_pnl_sum      = sell_orders[sell_orders['is_win'] == True]['net_realized_pnl'].sum()
-    lost_pnl_sum     = sell_orders[sell_orders['is_win'] == False]['net_realized_pnl'].sum()
+    won_pnl_sum      = float(won['net_pnl'].sum()) if wins else 0.0
+    lost_pnl_sum     = float(lost['net_pnl'].sum()) if losses else 0.0
     avg_gain_usd     = won_pnl_sum / wins if wins else 0.0
     avg_loss_usd_abs = abs(lost_pnl_sum / losses) if losses else 0.0
     total_avg        = avg_gain_usd + avg_loss_usd_abs
     avg_gain_split_usd = ([avg_gain_usd / total_avg, avg_loss_usd_abs / total_avg]
                            if total_avg else [0.0, 1.0])
 
-    # Avg Gain % = total PnL / total entry capital
-    df['_mult']        = df['code'].apply(get_multiplier)
-    df['_enter_value'] = df['price'] * df['qty'] * df['_mult']
-    total_enter_value  = df[df['trd_side'] == 'SELL']['_enter_value'].sum()
-    avg_gain_pct       = (total_pnl / total_enter_value) if total_enter_value else 0.0
+    # Avg Gain % = net P&L of closed positions / the capital they put in at entry
+    entry_capital = float(cp['entry_cost'].sum()) if n_pos else 0.0
+    avg_gain_pct  = (float(cp['net_pnl'].sum()) / entry_capital) if entry_capital else 0.0
 
     # Profit Factor = gross profit / |gross loss|
-    pf_raw   = round(float(won_pnl_sum) / float(abs(lost_pnl_sum)), 2) if losses and lost_pnl_sum != 0 else None
+    pf_raw   = round(won_pnl_sum / abs(lost_pnl_sum), 2) if losses and lost_pnl_sum != 0 else None
     pf_str   = f"{pf_raw:.2f}" if pf_raw is not None else "∞"
     pf_split = ([pf_raw / (pf_raw + 1), 1.0 / (pf_raw + 1)]
                 if pf_raw and pf_raw > 0 else [0.0, 1.0])
+    sell_count = n_pos
 
     # Last-7-days bar chart (today as anchor, 7 days back)
-    today         = pd.Timestamp.now().normalize()
+    today         = now_et().normalize()
     df['_date']   = df['create_time'].dt.strftime('%Y-%m-%d')
     daily_pnl_map = df.groupby('_date')['net_realized_pnl'].sum().to_dict()
 
@@ -1248,7 +1347,7 @@ def get_trading_stats():
             for _, r in daily_sum.iterrows()
         ]
     else:
-        today_str    = pd.Timestamp.today().strftime('%b %d, %Y')
+        today_str    = now_et().strftime('%b %d, %Y')
         profit_chart = [{"date": today_str, "value": 0.0}, {"date": today_str, "value": 0.0}]
 
     return jsonify({
@@ -1289,92 +1388,11 @@ def get_monthly_details():
     if month_closed.empty:
         return jsonify({"status": "empty"}), 200
 
-    # --- Deep stats analysis ---
-    trades_data = []
-    for _, row in month_closed.iterrows():
-        exit_time  = row['create_time']
-        ticker     = row['code']
-        side       = row['trd_side']
-        pnl        = row['net_realized_pnl']   # net (after fee) P&L
-        trade_type = "LONG" if side == 'SELL' else "SHORT"
-        clean_tick = ticker.split('.')[-1]
-
-        mult        = get_multiplier(ticker)
-        trade_value = float(row['price']) * float(row['qty']) * mult
-        pct         = (pnl / trade_value) if trade_value > 0 else 0
-
-        # Only enter_time needed here; build_trade_card fills in full transactions
-        _, enter_time = find_round_trip(df_all, ticker, exit_time, trade_type)
-
-        trades_data.append({
-            "pnl":         pnl,
-            "pct":         pct,
-            "is_win":      pnl > 0,
-            "type":        trade_type,
-            "holding_sec": (exit_time - enter_time).total_seconds(),
-            "entry_hour":  enter_time.hour + enter_time.minute / 60.0,
-            "symbol":      clean_tick,
-        })
-
-    df_t    = pd.DataFrame(trades_data)
-    won_df  = df_t[df_t['is_win']]
-    lost_df = df_t[~df_t['is_win']]
-
-    def fmt_usd(v):  return f"{'-' if v < 0 else ''}${abs(v):.2f}" if not pd.isna(v) else "$0.00"
-    def fmt_pct(v):  return f"{v * 100:.2f}%" if not pd.isna(v) else "0.00%"
-    def fmt_time(s):
-        if pd.isna(s): return "0s"
-        if s < 60:     return "a few seconds"
-        if s < 3600:   return f"{int(s / 60)}m"
-        if s < 86400:  return f"{int(s / 3600)}h"
-        return f"{int(s / 86400)}d"
-    def fmt_hour(h):
-        if pd.isna(h): return "0:00"
-        return f"{int(h):02d}:{int((h - int(h)) * 60):02d}"
-
-    # Symbol breakdown
-    symbol_stats = []
-    for sym, grp in df_t.groupby('symbol'):
-        w = grp[grp['is_win']]
-        l = grp[~grp['is_win']]
-        _spnl = float(grp['pnl'].sum())
-        symbol_stats.append({
-            "symbol": sym,
-            "trades": {"all": str(len(grp)), "won": str(len(w)), "lost": str(len(l))},
-            "amount": {
-                "all":  fmt_usd(_spnl),
-                "won":  fmt_usd(float(w['pnl'].sum())) if not w.empty else "$0.00",
-                "lost": fmt_usd(float(l['pnl'].sum())) if not l.empty else "$0.00",
-            },
-            "pnl_raw":      round(_spnl, 2),
-            "isProfit":     bool(_spnl >= 0),
-            "_raw_trades":  len(grp),
-            "_raw_pnl_abs": abs(_spnl),
-        })
-
-    stats = {
-        "gain_loss": {
-            "total":    {"all": fmt_usd(df_t['pnl'].sum()),  "won": fmt_usd(won_df['pnl'].sum()),  "lost": fmt_usd(lost_df['pnl'].sum())},
-            "avg_usd":  {"all": fmt_usd(df_t['pnl'].mean()), "won": fmt_usd(won_df['pnl'].mean()), "lost": fmt_usd(lost_df['pnl'].mean())},
-            "avg_pct":  {"all": fmt_pct(df_t['pct'].mean()), "won": fmt_pct(won_df['pct'].mean()), "lost": fmt_pct(lost_df['pct'].mean())},
-            "trades":   {"all": str(len(df_t)), "won": str(len(won_df)), "lost": str(len(lost_df))},
-            "win_rate": fmt_pct(len(won_df) / len(df_t) if len(df_t) else 0),
-        },
-        "long_short": {
-            "long":  {"all": str((df_t['type'] == 'LONG').sum()),  "won": str((won_df['type'] == 'LONG').sum()),  "lost": str((lost_df['type'] == 'LONG').sum())},
-            "short": {"all": str((df_t['type'] == 'SHORT').sum()), "won": str((won_df['type'] == 'SHORT').sum()), "lost": str((lost_df['type'] == 'SHORT').sum())},
-        },
-        "timing": {
-            "holding":    {"all": fmt_time(df_t['holding_sec'].mean()), "won": fmt_time(won_df['holding_sec'].mean()), "lost": fmt_time(lost_df['holding_sec'].mean())},
-            "entry_hour": {"all": fmt_hour(df_t['entry_hour'].mean()),  "won": fmt_hour(won_df['entry_hour'].mean()),  "lost": fmt_hour(lost_df['entry_hour'].mean())},
-        },
-        "best_worst": {
-            "largest_usd": {"won": fmt_usd(won_df['pnl'].max() if not won_df.empty else 0), "lost": fmt_usd(lost_df['pnl'].min() if not lost_df.empty else 0)},
-            "largest_pct": {"won": fmt_pct(won_df['pct'].max() if not won_df.empty else 0), "lost": fmt_pct(lost_df['pct'].min() if not lost_df.empty else 0)},
-        },
-        "symbols_by_trades":  sorted(symbol_stats, key=lambda x: x['_raw_trades'],   reverse=True),
-        "symbols_by_amount":  sorted(symbol_stats, key=lambda x: x['pnl_raw'],        reverse=True),
-    }
+    # Deep stats over positions that closed in this month
+    cp = closed_positions('AT')
+    month_cp = cp[cp['close_time'].dt.strftime('%B, %Y') == month_str] if not cp.empty else cp
+    stats = deep_stats(month_cp)
+    stats["r"] = r_stats(month_cp)
 
     # Full trade log
     month_trades_list = [
@@ -1393,7 +1411,9 @@ def get_monthly_details():
 
 @app.route('/api/performance', methods=['GET'])
 def get_performance():
-    """Deep performance analysis: core metrics, monthly bars, DOW distribution, gain/loss/timing/symbol stats."""
+    """Deep performance analysis over closed positions: core metrics, R statistics, monthly bars,
+    day-of-week distribution, deep stats, and a daily equity / drawdown curve.
+    """
     period = request.args.get('period', '1M')
 
     df_all = load_df_with_pnl()
@@ -1401,245 +1421,90 @@ def get_performance():
         return jsonify({"status": "empty"}), 200
 
     df = slice_by_period(df_all, period)
+    cp = closed_positions(period)
 
-    # ── Closing trade counts ──────────────────────────────────────
-    sell_orders = df[df['trd_side'] == 'SELL'].copy()
-    sell_count  = len(sell_orders)
-    wins        = (sell_orders['is_win'] == True).sum()
-    losses      = sell_count - wins
-    win_rate    = wins / sell_count if sell_count else 0.0
+    # ── Per-position outcomes ─────────────────────────────────────
+    n_pos    = len(cp)
+    won_df   = cp[cp['is_win']] if n_pos else cp
+    lost_df  = cp[~cp['is_win']] if n_pos else cp
+    wins, losses = len(won_df), len(lost_df)
+    win_rate = wins / n_pos if n_pos else 0.0
 
-    won_df  = sell_orders[sell_orders['is_win'] == True]
-    lost_df = sell_orders[sell_orders['is_win'] == False]
-
-    avg_win       = float(won_df['net_realized_pnl'].mean())  if wins   else 0.0
-    avg_loss      = abs(float(lost_df['net_realized_pnl'].mean())) if losses else 0.0
-    gross_profit  = float(won_df['net_realized_pnl'].sum())
-    gross_loss    = abs(float(lost_df['net_realized_pnl'].sum()))
-    profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.0
+    avg_win        = float(won_df['net_pnl'].mean()) if wins else 0.0
+    avg_loss       = abs(float(lost_df['net_pnl'].mean())) if losses else 0.0
+    gross_profit   = float(won_df['net_pnl'].sum()) if wins else 0.0
+    gross_loss     = abs(float(lost_df['net_pnl'].sum())) if losses else 0.0
+    profit_factor  = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.0
     win_loss_ratio = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0.0
-    expectancy    = round((avg_win * win_rate) - (avg_loss * (1 - win_rate)), 2) if sell_count else 0.0
-    total_pnl     = float(df['net_realized_pnl'].sum())
+    expectancy     = round(float(cp['net_pnl'].mean()), 2) if n_pos else 0.0
+    total_pnl      = float(df['net_realized_pnl'].sum())
 
-    # ── Max Drawdown ─────────────────────────────────────────────
-    df_sorted = df.sort_values('create_time').copy()
-    df_sorted['_cum'] = df_sorted['net_realized_pnl'].cumsum()
-    peak = df_sorted['_cum'].cummax()
-    max_drawdown = float((df_sorted['_cum'] - peak).min()) if not df_sorted.empty else 0.0
-
-    # ── Streak ───────────────────────────────────────────────────
-    cur_win_streak = cur_loss_streak = 0
-    max_win_streak = max_loss_streak = 0
-    for _, row in sell_orders.sort_values('create_time').iterrows():
-        if bool(row['is_win']):
-            cur_win_streak  += 1; cur_loss_streak = 0
+    # ── Streaks (positions in close order) ────────────────────────
+    cur_win_streak = cur_loss_streak = max_win_streak = max_loss_streak = 0
+    for is_win in (cp['is_win'] if n_pos else []):
+        if is_win:
+            cur_win_streak += 1; cur_loss_streak = 0
         else:
-            cur_loss_streak += 1; cur_win_streak  = 0
-        max_win_streak  = max(max_win_streak,  cur_win_streak)
+            cur_loss_streak += 1; cur_win_streak = 0
+        max_win_streak  = max(max_win_streak, cur_win_streak)
         max_loss_streak = max(max_loss_streak, cur_loss_streak)
     current_streak_type  = 'W' if cur_win_streak > 0 else 'L'
     current_streak_count = cur_win_streak if cur_win_streak > 0 else cur_loss_streak
 
-    # ── Monthly bar chart ────────────────────────────────────────
+    # ── Monthly bar chart (realized P&L by month) ────────────────
     df['_month_key'] = df['create_time'].dt.strftime('%Y-%m')
     df['_month_lbl'] = df['create_time'].dt.strftime('%b %Y')
     monthly_grp = df.groupby(['_month_key', '_month_lbl'])['net_realized_pnl'].sum().reset_index()
-    monthly_grp = monthly_grp.sort_values('_month_key')
     monthly_bars = [
         {"label": str(r['_month_lbl']), "value": round(float(r['net_realized_pnl']), 2),
          "isProfit": bool(r['net_realized_pnl'] >= 0)}
-        for _, r in monthly_grp.iterrows()
+        for _, r in monthly_grp.sort_values('_month_key').iterrows()
     ]
 
-    # ── Day-of-week distribution ──────────────────────────────────
-    sell_orders['_dow'] = sell_orders['create_time'].dt.dayofweek
-    dow_labels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']
+    # ── Day-of-week distribution (by close day) ───────────────────
     dow_stats = []
-    for i, lbl in enumerate(dow_labels):
-        grp = sell_orders[sell_orders['_dow'] == i]
-        day_wins  = (grp['is_win'] == True).sum()
-        day_total = len(grp)
-        day_pnl   = float(grp['net_realized_pnl'].sum())
+    for i, lbl in enumerate(['Mon', 'Tue', 'Wed', 'Thu', 'Fri']):
+        grp = cp[cp['close_time'].dt.dayofweek == i] if n_pos else cp
+        day_pnl = float(grp['net_pnl'].sum()) if len(grp) else 0.0
         dow_stats.append({
             "label":    lbl,
-            "trades":   int(day_total),
-            "win_rate": round(float(day_wins) / day_total, 4) if day_total else 0.0,
+            "trades":   int(len(grp)),
+            "win_rate": round(float(grp['is_win'].sum()) / len(grp), 4) if len(grp) else 0.0,
             "pnl":      round(day_pnl, 2),
             "isProfit": bool(day_pnl >= 0),
         })
 
-    # ── Deep stats (mirrors monthly_details logic, adapts to any period) ────
-    # Rebuild trade-level data for each closing trade
-    closed = sell_orders.copy()
-
-    def fmt_usd(v):
-        if pd.isna(v): return "$0.00"
-        return f"{'-' if v < 0 else ''}${abs(v):.2f}"
-    def fmt_pct(v):
-        return f"{v * 100:.2f}%" if not pd.isna(v) else "0.00%"
-    def fmt_time(s):
-        if pd.isna(s): return "0s"
-        if s < 60:     return "a few seconds"
-        if s < 3600:   return f"{int(s / 60)}m"
-        if s < 86400:  return f"{int(s / 3600)}h"
-        return f"{int(s / 86400)}d"
-    def fmt_hour(h):
-        if pd.isna(h): return "0:00"
-        return f"{int(h):02d}:{int((h - int(h)) * 60):02d}"
-
-    trades_data = []
-    for _, row in closed.iterrows():
-        exit_time  = row['create_time']
-        ticker     = row['code']
-        pnl        = row['net_realized_pnl']   # net (after fee)
-        trade_type = "LONG"   # sell = close long
-        clean_tick = ticker.split('.')[-1]
-        mult        = get_multiplier(ticker)
-        trade_value = float(row['price']) * float(row['qty']) * mult
-        pct         = (pnl / trade_value) if trade_value > 0 else 0
-        _, enter_time = find_round_trip(df_all, ticker, exit_time, trade_type)
-        trades_data.append({
-            "pnl":         float(pnl),
-            "pct":         float(pct),
-            "is_win":      bool(row['is_win']),
-            "type":        trade_type,
-            "holding_sec": float((exit_time - enter_time).total_seconds()),
-            "entry_hour":  float(enter_time.hour + enter_time.minute / 60.0),
-            "symbol":      clean_tick,
-        })
-
-    # Also include short exits (BUY to cover)
-    buy_covers = df[(df['trd_side'] == 'BUY') & (df['realized_pnl'] != 0)].copy()
-    for _, row in buy_covers.iterrows():
-        exit_time  = row['create_time']
-        ticker     = row['code']
-        pnl        = row['net_realized_pnl']   # net (after fee)
-        clean_tick = ticker.split('.')[-1]
-        mult        = get_multiplier(ticker)
-        trade_value = float(row['price']) * float(row['qty']) * mult
-        pct         = (pnl / trade_value) if trade_value > 0 else 0
-        _, enter_time = find_round_trip(df_all, ticker, exit_time, "SHORT")
-        trades_data.append({
-            "pnl":         float(pnl),
-            "pct":         float(pct),
-            "is_win":      bool(pnl > 0),
-            "type":        "SHORT",
-            "holding_sec": float((exit_time - enter_time).total_seconds()),
-            "entry_hour":  float(enter_time.hour + enter_time.minute / 60.0),
-            "symbol":      clean_tick,
-        })
-
-    df_t    = pd.DataFrame(trades_data) if trades_data else pd.DataFrame(
-        columns=['pnl','pct','is_win','type','holding_sec','entry_hour','symbol'])
-    won_t   = df_t[df_t['is_win'] == True]
-    lost_t  = df_t[df_t['is_win'] == False]
-
-    # Symbol breakdown
-    symbol_stats = []
-    for sym, grp in df_t.groupby('symbol'):
-        w = grp[grp['is_win'] == True]
-        l = grp[grp['is_win'] == False]
-        _sym_pnl = float(grp['pnl'].sum())
-        symbol_stats.append({
-            "symbol": str(sym),
-            "trades": {"all": str(len(grp)), "won": str(len(w)), "lost": str(len(l))},
-            "amount": {
-                "all":  fmt_usd(_sym_pnl),
-                "won":  fmt_usd(float(w['pnl'].sum())) if not w.empty else "$0.00",
-                "lost": fmt_usd(float(l['pnl'].sum())) if not l.empty else "$0.00",
-            },
-            "pnl_raw":      round(_sym_pnl, 2),
-            "isProfit":     bool(_sym_pnl >= 0),
-            "_raw_trades":  int(len(grp)),
-            "_raw_pnl_abs": abs(_sym_pnl),
-        })
-
-    deep_stats = {
-        "gain_loss": {
-            "total":   {"all": fmt_usd(df_t['pnl'].sum()),  "won": fmt_usd(won_t['pnl'].sum()),  "lost": fmt_usd(lost_t['pnl'].sum())},
-            "avg_usd": {"all": fmt_usd(df_t['pnl'].mean()), "won": fmt_usd(won_t['pnl'].mean()), "lost": fmt_usd(lost_t['pnl'].mean())},
-            "avg_pct": {"all": fmt_pct(df_t['pct'].mean()), "won": fmt_pct(won_t['pct'].mean()), "lost": fmt_pct(lost_t['pct'].mean())},
-            "trades":  {"all": str(len(df_t)), "won": str(len(won_t)), "lost": str(len(lost_t))},
-            "win_rate": fmt_pct(len(won_t) / len(df_t) if len(df_t) else 0),
-        },
-        "long_short": {
-            "long":  {"all": str((df_t['type'] == 'LONG').sum()),  "won": str((won_t['type'] == 'LONG').sum()),  "lost": str((lost_t['type'] == 'LONG').sum())},
-            "short": {"all": str((df_t['type'] == 'SHORT').sum()), "won": str((won_t['type'] == 'SHORT').sum()), "lost": str((lost_t['type'] == 'SHORT').sum())},
-        },
-        "timing": {
-            "holding":    {"all": fmt_time(df_t['holding_sec'].mean()), "won": fmt_time(won_t['holding_sec'].mean()), "lost": fmt_time(lost_t['holding_sec'].mean())},
-            "entry_hour": {"all": fmt_hour(df_t['entry_hour'].mean()),  "won": fmt_hour(won_t['entry_hour'].mean()),  "lost": fmt_hour(lost_t['entry_hour'].mean())},
-        },
-        "best_worst": {
-            "largest_usd": {
-                "won":  fmt_usd(won_t['pnl'].max() if not won_t.empty else 0),
-                "lost": fmt_usd(lost_t['pnl'].min() if not lost_t.empty else 0),
-            },
-            "largest_pct": {
-                "won":  fmt_pct(won_t['pct'].max() if not won_t.empty else 0),
-                "lost": fmt_pct(lost_t['pct'].min() if not lost_t.empty else 0),
-            },
-        },
-        "symbols_by_trades": sorted(symbol_stats, key=lambda x: x['_raw_trades'],   reverse=True),
-        "symbols_by_amount": sorted(symbol_stats, key=lambda x: x['pnl_raw'],        reverse=True),
-    }
-
-    # ── Sharpe Ratio ──────────────────────────────────────────────────────────
-    # Per-trade % returns; annualization factor = sqrt(252)
-    trade_returns = df_t['pct'].dropna() if not df_t.empty else pd.Series(dtype=float)
-    if len(trade_returns) >= 2:
-        mean_r = float(trade_returns.mean())
-        std_r  = float(trade_returns.std())
-        sharpe_ratio = round((mean_r / std_r) * (252 ** 0.5), 2) if std_r > 0 else 0.0
+    # ── Risk ratios on the daily P&L series (scale-free, so no account size needed) ──
+    daily = daily_pnl_series(df)
+    if len(daily) >= 2 and daily.std() > 0:
+        sharpe_ratio = round(float(daily.mean() / daily.std()) * (252 ** 0.5), 2)
+        downside_dev = float(((daily.clip(upper=0)) ** 2).mean() ** 0.5)
+        sortino_ratio = round(float(daily.mean()) / downside_dev * (252 ** 0.5), 2) if downside_dev > 0 else 0.0
     else:
-        sharpe_ratio = 0.0
+        sharpe_ratio = sortino_ratio = 0.0
 
-    # ── Sortino Ratio ─────────────────────────────────────────────────────────
-    # Uses downside deviation only (std of negative returns)
-    if len(trade_returns) >= 2:
-        neg_returns  = trade_returns[trade_returns < 0]
-        downside_std = float(neg_returns.std()) if len(neg_returns) >= 2 else 0.0
-        sortino_ratio = round((mean_r / downside_std) * (252 ** 0.5), 2) if downside_std > 0 else 0.0
-    else:
-        sortino_ratio = 0.0
-
-    # ── Kelly Criterion ───────────────────────────────────────────────────────
-    # Kelly % = W - (1 - W) / R, where W = win rate, R = avg win / avg loss
+    # Kelly % = W − (1 − W) / (avg win / avg loss); negative means "don't trade this"
     if win_loss_ratio > 0 and 0 < win_rate < 1:
-        kelly_pct = round((win_rate - (1 - win_rate) / win_loss_ratio) * 100, 1)
-        kelly_pct = max(kelly_pct, 0.0)   # negative Kelly = do not trade
+        kelly_pct = max(round((win_rate - (1 - win_rate) / win_loss_ratio) * 100, 1), 0.0)
     else:
         kelly_pct = 0.0
 
-    # ── Drawdown curve (equity curve + drawdown depth per trade) ─────────────
-    # Sort by close time; accumulate PnL; track running peak and current drawdown
-    if not df_t.empty:
-        # Rebuild cumulative PnL sequence from df (time-sliced raw data)
-        df_closed = df[df['realized_pnl'] != 0].sort_values('create_time')
-        equity_pts = []
-        cum = 0.0
-        peak = 0.0
-        for _, r in df_closed.iterrows():
-            cum  += float(r['net_realized_pnl'])
-            peak  = max(peak, cum)
-            dd    = cum - peak          # negative or zero
-            equity_pts.append({
-                "date":     r['create_time'].strftime('%b %d'),
-                "equity":   round(cum, 2),
-                "drawdown": round(dd, 2),
-            })
-        # Cap at 200 points to avoid oversized payloads
-        if len(equity_pts) > 200:
-            step = len(equity_pts) // 200
-            equity_pts = equity_pts[::step]
-    else:
-        equity_pts = []
+    # ── Equity / drawdown curve: cumulative realized P&L per day, peak starts at 0 ──
+    equity_pts, max_drawdown = [], 0.0
+    cum = peak = 0.0
+    for day, pnl in daily.items():
+        cum += float(pnl)
+        peak = max(peak, cum)
+        max_drawdown = min(max_drawdown, cum - peak)
+        equity_pts.append({"date": day.strftime('%b %d'), "equity": round(cum, 2), "drawdown": round(cum - peak, 2)})
+    if len(equity_pts) > 200:
+        equity_pts = equity_pts[::len(equity_pts) // 200]
 
     return jsonify({
         "status": "success",
         "summary": {
             "total_pnl":           round(total_pnl, 2),
-            "trade_count":         sell_count,
+            "trade_count":         n_pos,
             "win_rate":            f"{int(win_rate * 100)}%",
             "profit_factor":       profit_factor,
             "expectancy":          expectancy,
@@ -1651,14 +1516,14 @@ def get_performance():
             "max_loss_streak":     int(max_loss_streak),
             "current_streak":      int(current_streak_count),
             "current_streak_type": current_streak_type,
-            # Risk metrics
             "sharpe_ratio":        sharpe_ratio,
             "sortino_ratio":       sortino_ratio,
             "kelly_pct":           kelly_pct,
         },
+        "r_stats":        r_stats(cp),
         "monthly_bars":   monthly_bars,
         "dow_stats":      dow_stats,
-        "deep_stats":     deep_stats,
+        "deep_stats":     deep_stats(cp),
         "drawdown_curve": equity_pts,
     }), 200
 
@@ -1716,6 +1581,8 @@ def upload_image(trade_id: str):
 
     file      = request.files['image']
     ext       = os.path.splitext(file.filename)[1].lower() or '.jpg'
+    if ext not in ALLOWED_IMAGE_EXTS:
+        return jsonify({"status": "error", "message": f"Unsupported image type: {ext}"}), 400
     filename  = f"{trade_id}_{uuid.uuid4().hex[:8]}{ext}"
     save_path = os.path.join(UPLOAD_DIR, filename)
     file.save(save_path)
@@ -1752,23 +1619,25 @@ def upload_image(trade_id: str):
 
 @app.route('/api/delete_image/<trade_id>/<filename>', methods=['DELETE'])
 def delete_image(trade_id: str, filename: str):
-    """Delete a screenshot (physical file + database record)."""
-    file_path = os.path.join(UPLOAD_DIR, filename)
-    if os.path.exists(file_path):
-        os.remove(file_path)
-
+    """Delete a screenshot (physical file + database record). Only images attached to this trade."""
     conn = sqlite3.connect(DB_FILE)
     existing = conn.execute(
         'SELECT image_paths FROM trade_notes WHERE trade_id = ?', (trade_id,)
     ).fetchone()
-    if existing:
-        paths = [p for p in json.loads(existing[0]) if p != filename]
-        conn.execute(
-            'UPDATE trade_notes SET image_paths = ?, updated_at = ? WHERE trade_id = ?',
-            (json.dumps(paths), datetime.now().isoformat(), trade_id)
-        )
-        conn.commit()
+    paths = json.loads(existing[0]) if existing else []
+    if filename not in paths:
+        conn.close()
+        return jsonify({"status": "error", "message": "Image not found for this trade"}), 404
+
+    conn.execute(
+        'UPDATE trade_notes SET image_paths = ?, updated_at = ? WHERE trade_id = ?',
+        (json.dumps([p for p in paths if p != filename]), datetime.now().isoformat(), trade_id)
+    )
+    conn.commit()
     conn.close()
+    file_path = os.path.join(UPLOAD_DIR, filename)
+    if os.path.exists(file_path):
+        os.remove(file_path)
     return jsonify({"status": "success"}), 200
 
 
@@ -2476,13 +2345,12 @@ def get_holding_trades(ticker):
             # Specific position requested (from AllTradesScreen)
             target_df = df_pnl[df_pnl['position_id'] == position_id].copy()
         else:
-            # Auto-detect open positions (net qty > 0)
-            open_pids = set()
-            for pid, grp in df_pnl.groupby('position_id'):
-                buy_qty  = grp[grp['trd_side'].isin(['BUY',  'BUY_BACK'])]['qty'].sum()
-                sell_qty = grp[grp['trd_side'].isin(['SELL', 'SELL_SHORT'])]['qty'].sum()
-                if buy_qty - sell_qty > 0.001:
-                    open_pids.add(pid)
+            # Auto-detect the currently open position(s) of this ticker
+            pos = load_positions()
+            open_pids = set(
+                pos[(pos['status'] == 'open') &
+                    (pos['code'].str.replace('US.', '').str.upper() == ticker_clean)]['position_id']
+            ) if not pos.empty else set()
             if not open_pids:
                 return jsonify({'status': 'success', 'data': [], 'r_multiple': None}), 200
             target_df = df_pnl[df_pnl['position_id'].isin(open_pids)].copy()
@@ -2518,10 +2386,6 @@ def get_holding_trades(ticker):
             fee_map.get(str(oid), 0.0)
             for oid in target_df[entry_mask]['order_id'].astype(str)
         )
-        total_fee   = sum(fee_map.values()) + (
-            total_entry_fee if final_close_id else 0  # already included via final_close
-        )
-        # total fee = all exit fees + all entry fees (entry fees charged once total)
         total_all_fees = sum(fee_map.get(str(oid), 0.0) for oid in order_ids)
         total_net_pnl  = round(total_pnl - total_all_fees, 2)
 
@@ -2532,14 +2396,13 @@ def get_holding_trades(ticker):
             float((entry_legs['price'] * entry_legs['qty']).sum()) / entry_qty
         ) if entry_qty > 0 else 0.0
 
-        # R = total_pnl / (|entry - stop| × total_exit_qty)
-        r_multiple = None
-        if stop_price and entry_price > 0:
-            exit_legs = target_df[target_df['trd_side'].isin(['SELL', 'BUY_BACK'])]
-            exit_qty  = float(exit_legs['qty'].sum())
-            risk      = abs(entry_price - stop_price) * exit_qty
-            if risk > 0.001:
-                r_multiple = round(total_pnl / risk, 2)
+        # R = net P&L / (|avg entry − initial stop| × shares entered), from the position engine
+        summary = load_positions()
+        match = summary[summary['position_id'] == pid_used] if not summary.empty else summary
+        r_multiple   = match.iloc[0]['r_multiple'] if not match.empty else None
+        initial_stop = None
+        if not match.empty and not pd.isna(match.iloc[0]['initial_stop']):
+            initial_stop = float(match.iloc[0]['initial_stop'])
 
         result = []
         for _, row in target_df.iterrows():
@@ -2577,6 +2440,7 @@ def get_holding_trades(ticker):
             'total_net_pnl':  total_net_pnl,
             'entry_price':    round(entry_price, 4),
             'stop_price':     stop_price,
+            'initial_stop':   initial_stop,
             'r_multiple':     r_multiple,
         }), 200
 
@@ -2627,6 +2491,7 @@ def get_account():
 
 if __name__ == '__main__':
     print("Backend Server Running")
+    assign_position_ids()
     _write_position_pnl()
     # Kick off RAG index build in background (non-blocking)
     if DEEPSEEK_API_KEY:
@@ -2636,4 +2501,5 @@ if __name__ == '__main__':
             print("RAG index building in background...")
         except Exception as e:
             print(f"RAG init skipped: {e}")
-    app.run(host='0.0.0.0', port=5001)
+    # Default to loopback: remote access goes through `tailscale serve`, never a public port
+    app.run(host=os.environ.get('VENCH_HOST', '127.0.0.1'), port=int(os.environ.get('VENCH_PORT', '5001')))

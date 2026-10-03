@@ -8,7 +8,7 @@ export default defineConfig(({ mode }) => {
     plugins: [react(), tailwindcss()],
     server: {
       proxy: {
-        '/api': env.VITE_API_URL ?? 'http://localhost:5001',
+        '/api': { target: env.VITE_API_URL ?? 'http://localhost:5001', changeOrigin: true },
       },
     },
   }
