@@ -6,29 +6,109 @@ Architecture: DeepSeek Function Calling
 """
 
 import os
+import gc
 import json
+import time
+import ctypes
+import hashlib
 import sqlite3
 import threading
 from openai import OpenAI
-import chromadb
-from chromadb.utils import embedding_functions
 
 DB_FILE    = 'local.db'
 CHROMA_DIR = './chroma_db'
+EMBED_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"   # Chinese + English
+COLLECTION  = "vench_notes"
 
-# ChromaDB — only used for notes (daily_notes + trade_notes)
-_ef = embedding_functions.SentenceTransformerEmbeddingFunction(
-    model_name="paraphrase-multilingual-MiniLM-L12-v2"
-)
-_chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
-_collection    = _chroma_client.get_or_create_collection(
-    name="vench_journal",
-    embedding_function=_ef,
-    metadata={"hnsw:space": "cosine"},
-)
+# The multilingual model runs on ONNX Runtime via fastembed (~650 MB loaded, ~14 s cold start on
+# the 842 MB VM; the PyTorch/sentence-transformers build of the same model needed ~1.2 GB and
+# ~100 s). It is still loaded only on the first notes search, and dropped again when idle.
+# After this long without a notes search the model is dropped again (the index stays on disk).
+IDLE_UNLOAD_SECS = int(os.environ.get('RAG_IDLE_UNLOAD_SECS', '600'))
 
-_index_lock  = threading.Lock()
-_index_built = False
+_collection  = None
+_last_used   = 0.0
+_index_lock  = threading.RLock()
+_index_dirty = True   # notes changed since the last refresh (or never indexed in this process)
+
+
+_embed_model = None   # one shared ONNX model; chromadb may rebuild the function from its config
+
+
+def _shared_model():
+    global _embed_model
+    if _embed_model is None:
+        from fastembed import TextEmbedding
+        _embed_model = TextEmbedding(EMBED_MODEL)
+    return _embed_model
+
+
+def _fastembed_function():
+    """Dense embeddings from fastembed (ONNX) in the shape chromadb expects."""
+    from chromadb.api.types import EmbeddingFunction
+    import numpy as np
+
+    class FastEmbedFunction(EmbeddingFunction):
+        def __init__(self, model_name: str = EMBED_MODEL):
+            self.model_name = model_name
+
+        def __call__(self, input):
+            return [np.asarray(v, dtype=np.float32) for v in _shared_model().embed(list(input))]
+
+        @staticmethod
+        def name() -> str:
+            return "vench_fastembed"
+
+        def get_config(self) -> dict:
+            return {"model_name": self.model_name}
+
+        @staticmethod
+        def build_from_config(config: dict):
+            return FastEmbedFunction(config["model_name"])
+
+    return FastEmbedFunction()
+
+
+def _get_collection():
+    global _collection, _last_used
+    with _index_lock:
+        _last_used = time.time()
+        if _collection is None:
+            import chromadb
+            client = chromadb.PersistentClient(path=CHROMA_DIR)
+            if "vench_journal" in [c.name for c in client.list_collections()]:
+                client.delete_collection("vench_journal")   # old PyTorch-embedded index
+            _collection = client.get_or_create_collection(
+                name=COLLECTION, embedding_function=_fastembed_function(),
+                metadata={"hnsw:space": "cosine"},
+            )
+            threading.Thread(target=_unload_when_idle, daemon=True).start()
+        return _collection
+
+
+def _unload_when_idle():
+    """Drop the embedding model once notes search has been idle for IDLE_UNLOAD_SECS."""
+    global _collection, _embed_model
+    while True:
+        time.sleep(min(60, IDLE_UNLOAD_SECS))
+        with _index_lock:
+            if time.time() - _last_used < IDLE_UNLOAD_SECS:
+                continue
+            _collection = None
+            _embed_model = None
+        gc.collect()
+        try:
+            ctypes.CDLL("libc.so.6").malloc_trim(0)   # hand freed heap back to the OS (glibc)
+        except OSError:
+            pass
+        print("[rag] embedding model unloaded after idle period")
+        return
+
+
+def mark_dirty():
+    """Call when notes (or the trades they describe) change; the next search re-syncs the index."""
+    global _index_dirty
+    _index_dirty = True
 
 
 # ─────────────────────────── index building (notes only) ───────────────────
@@ -72,23 +152,36 @@ def _load_documents() -> tuple[list[str], list[dict], list[str]]:
 
 
 def build_index(force: bool = False) -> int:
-    """Build (or rebuild) the ChromaDB notes index. Thread-safe."""
-    global _index_built
+    """Bring the notes index in line with SQLite. Only new or edited notes are embedded (a content
+    hash is kept in each entry's metadata); deleted notes are removed. force=True re-embeds all.
+    """
+    global _index_dirty
     with _index_lock:
-        if _index_built and not force:
-            return _collection.count()
+        col = _get_collection()
+        if not _index_dirty and not force:
+            return col.count()
 
         docs, metas, ids = _load_documents()
-        if docs:
-            for i in range(0, len(docs), 100):
-                _collection.upsert(
-                    documents=docs[i:i+100],
-                    metadatas=metas[i:i+100],
-                    ids=ids[i:i+100],
-                )
-        _index_built = True
-        print(f"[rag] index built: {_collection.count()} notes")
-        return _collection.count()
+        for meta, doc in zip(metas, docs):
+            meta["hash"] = hashlib.sha1(doc.encode("utf-8")).hexdigest()
+
+        existing = col.get(include=["metadatas"])
+        have = {i: (m or {}).get("hash") for i, m in zip(existing["ids"], existing["metadatas"])}
+        todo = [k for k, i in enumerate(ids) if force or have.get(i) != metas[k]["hash"]]
+        for start in range(0, len(todo), 100):
+            batch = todo[start:start + 100]
+            col.upsert(
+                documents=[docs[k] for k in batch],
+                metadatas=[metas[k] for k in batch],
+                ids=[ids[k] for k in batch],
+            )
+        stale = sorted(set(have) - set(ids))
+        if stale:
+            col.delete(ids=stale)
+
+        _index_dirty = False
+        print(f"[rag] index synced: {len(todo)} embedded, {len(stale)} removed, {col.count()} notes")
+        return col.count()
 
 
 # ─────────────────────────── tools ─────────────────────────────────────────
@@ -99,7 +192,8 @@ def _run_sql(query: str) -> str:
     if not q.upper().startswith("SELECT"):
         return "Error: only SELECT statements are allowed."
     try:
-        conn = sqlite3.connect(DB_FILE)
+        # Read-only connection: the model can only ever read, whatever SQL it writes
+        conn = sqlite3.connect(f"file:{DB_FILE}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(q).fetchmany(200)
         conn.close()
@@ -111,11 +205,12 @@ def _run_sql(query: str) -> str:
 
 
 def _search_notes(query: str, n: int = 6) -> str:
-    if not _index_built:
+    col = _get_collection()
+    if _index_dirty:
         build_index()
-    if _collection.count() == 0:
+    if col.count() == 0:
         return "暂无笔记内容。"
-    results = _collection.query(query_texts=[query], n_results=n)
+    results = col.query(query_texts=[query], n_results=min(n, col.count()))
     docs = results["documents"][0]
     if not docs:
         return "未找到相关笔记。"
@@ -242,9 +337,6 @@ def ask(question: str, history: list[dict] | None = None) -> dict:
     history: list of prior {"role": ..., "content": ...} messages.
     Returns {"answer": str, "sources": list, "history": updated list}
     """
-    if not _index_built:
-        build_index()
-
     history = history or []
     client  = OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
     messages = _build_messages(question, history)
@@ -266,9 +358,6 @@ def ask_stream(question: str, history: list[dict] | None = None):
     Streaming version: tool calls run synchronously, final answer streams via SSE.
     Yields SSE-formatted strings. Last yield contains sources + updated history as JSON.
     """
-    if not _index_built:
-        build_index()
-
     history  = history or []
     client   = OpenAI(api_key=os.getenv("DEEPSEEK_API_KEY"), base_url="https://api.deepseek.com")
     messages = _build_messages(question, history)
@@ -349,11 +438,3 @@ def ask_stream(question: str, history: list[dict] | None = None):
     meta = json.dumps({"sources": sources, "history": new_history}, ensure_ascii=False)
     yield f"data: [META]{meta}\n\n"
     yield "data: [DONE]\n\n"
-
-
-# ─────────────────────────── background init ───────────────────────────────
-
-def init_async():
-    """Start index building in background thread so Flask startup isn't blocked."""
-    t = threading.Thread(target=build_index, daemon=True)
-    t.start()

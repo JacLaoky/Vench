@@ -48,6 +48,7 @@ _account_cache_time: float = 0.0    # account balance cache write time
 ACCOUNT_CACHE_SECS = 60             # /api/account cache TTL
 _detail_cache: dict = {}            # sector_detail cache, keyed by ticker
 _detail_cache_time: dict = {}       # sector_detail cache write time
+DETAIL_CACHE_MAX = 200              # oldest ticker evicted beyond this (key comes from the URL)
 BREADTH_CACHE_SECS  = 120           # market breadth cache
 EARNINGS_CACHE_SECS = 3600         # earnings calendar cache (1 hour)
 _breadth_cache: dict | None = None
@@ -400,12 +401,12 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
     pnl        = row['realized_pnl']
     trade_type = "LONG" if side == 'SELL' else "SHORT"
 
-    # Scope find_round_trip to this position only (if position_id available)
-    row_pos_id = row.get('position_id') if hasattr(row, 'get') else getattr(row, 'position_id', None)
-    if row_pos_id and 'position_id' in df.columns:
-        trip_df = df[df['position_id'] == row_pos_id]
-    else:
-        trip_df = df  # fallback: old behaviour (all ticker history)
+    ctx = _card_context()
+    trade_id = str(row['order_id'])
+    saved_tags, position_id, own_fee, own_fee_details = ctx['meta'].get(trade_id, ([], None, 0.0, []))
+
+    # Scope find_round_trip to this position's fills only
+    trip_df = ctx['fills'].get(position_id, df)
 
     transactions, enter_time = find_round_trip(trip_df, ticker_raw, exit_time, trade_type)
 
@@ -431,72 +432,26 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
     else:
         entry_price = 0.0
 
-    # Load existing note and images for this trade (empty defaults if none)
-    trade_id = str(row['order_id'])
-    conn = sqlite3.connect(DB_FILE)
-    note_row = conn.execute(
-        'SELECT note, image_paths FROM trade_notes WHERE trade_id = ?', (trade_id,)
-    ).fetchone()
-    tags_row = conn.execute(
-        'SELECT tags, position_id FROM trades WHERE order_id = ?', (trade_id,)
-    ).fetchone()
-    saved_note  = note_row[0] if note_row else ''
-    saved_images = json.loads(note_row[1]) if note_row else []
-    saved_tags  = json.loads(tags_row[0]) if tags_row and tags_row[0] else []
-    position_id = tags_row[1] if tags_row and tags_row[1] else None
+    saved_note, saved_images = ctx['notes'].get(trade_id, ('', []))
 
-    # Fee logic:
-    # - Each partial exit shows only its own closing-order fee.
-    # - The FINAL exit (last close that fully closes the position) also picks up
-    #   ALL entry-leg fees (scale-in buys), since entry costs can't be fairly
-    #   split across individual partial exits.
-    entry_sides = ('BUY', 'SELL_SHORT')
-    close_sides = ('SELL', 'BUY_BACK')
-
-    # Determine if this is the last closing order for this position
-    is_final_close = True  # default for no-position-id fallback
-    if position_id:
-        last_close_row = conn.execute(
-            f'''SELECT order_id FROM trades
-                WHERE position_id = ? AND trd_side IN {close_sides}
-                ORDER BY create_time DESC LIMIT 1''',
-            (position_id,)
-        ).fetchone()
-        is_final_close = last_close_row is not None and last_close_row[0] == trade_id
-
-    # Always include this exit's own fee
-    fee_row     = conn.execute(
-        'SELECT fee, fee_details FROM trades WHERE order_id = ?', (trade_id,)
-    ).fetchone()
-    fee_amount  = float(fee_row[0]) if fee_row and fee_row[0] else 0.0
-    fee_details = json.loads(fee_row[1]) if fee_row and fee_row[1] else []
-
-    # On the final exit: also add all entry-leg fees (scale-in buys)
+    # Fees: each partial exit carries its own fee; the final exit of the position also carries
+    # every entry-leg fee (scale-in buys), since entry costs can't be fairly split across exits.
+    is_final_close = position_id is None or ctx['last_close'].get(position_id) == trade_id
+    fee_amount  = own_fee
+    fee_details = list(own_fee_details)
     if is_final_close and position_id:
-        entry_fee_rows = conn.execute(
-            f'''SELECT fee, fee_details FROM trades
-                WHERE position_id = ? AND trd_side IN {entry_sides}''',
-            (position_id,)
-        ).fetchall()
-        for r in entry_fee_rows:
-            fee_amount += float(r[0]) if r[0] else 0.0
-            if r[1]:
-                fee_details.extend(json.loads(r[1]))
-
-    conn.close()
+        entry_fee, entry_details = ctx['entry_fees'].get(position_id, (0.0, []))
+        fee_amount += entry_fee
+        fee_details.extend(entry_details)
 
     # Position-level facts (stops, status, R) come from the position engine
-    stop_price = initial_stop = position_r = None
-    position_status = None
-    if position_id:
-        pos = load_positions()
-        match = pos[pos['position_id'] == position_id] if not pos.empty else pos
-        if not match.empty:
-            p = match.iloc[0]
-            stop_price      = None if pd.isna(p['stop_price']) else float(p['stop_price'])
-            initial_stop    = None if pd.isna(p['initial_stop']) else float(p['initial_stop'])
-            position_status = p['status']
-            position_r      = p['r_multiple']
+    stop_price = initial_stop = position_r = position_status = None
+    p = ctx['positions'].get(position_id)
+    if p is not None:
+        stop_price      = None if pd.isna(p['stop_price']) else float(p['stop_price'])
+        initial_stop    = None if pd.isna(p['initial_stop']) else float(p['initial_stop'])
+        position_status = p['status']
+        position_r      = p['r_multiple']
 
     net_pnl_val = round(pnl - fee_amount, 2)
     pct         = (net_pnl_val / trade_value * 100) if trade_value > 0 else 0
@@ -539,11 +494,63 @@ _pnl_cache: pd.DataFrame | None = None
 _positions_cache: pd.DataFrame | None = None
 
 
+_card_ctx: dict | None = None
+
+
 def invalidate_cache():
-    """Call after syncing data or editing stops to clear the derived caches."""
-    global _pnl_cache, _positions_cache
+    """Call after syncing data or editing stops/notes/tags to clear the derived caches."""
+    global _pnl_cache, _positions_cache, _card_ctx
     _pnl_cache = None
     _positions_cache = None
+    _card_ctx = None
+
+
+def _card_context() -> dict:
+    """Everything build_trade_card looks up, loaded once per cache generation instead of
+    ~5 queries per card (the journal renders hundreds of cards)."""
+    global _card_ctx
+    if _card_ctx is not None:
+        return _card_ctx
+    conn = sqlite3.connect(DB_FILE)
+    notes = {
+        tid: (note, json.loads(paths) if paths else [])
+        for tid, note, paths in conn.execute('SELECT trade_id, note, image_paths FROM trade_notes')
+    }
+    meta, last_close, entry_fees = {}, {}, {}
+    for oid, pid, side, tags, fee, details in conn.execute(
+        'SELECT order_id, position_id, trd_side, tags, fee, fee_details FROM trades '
+        'ORDER BY create_time, order_id'
+    ):
+        fee = float(fee or 0)
+        details = json.loads(details) if details else []
+        meta[oid] = (json.loads(tags) if tags else [], pid, fee, details)
+        if side in ('SELL', 'BUY_BACK'):
+            last_close[pid] = oid          # ordered by time: the last one wins
+        elif side in ('BUY', 'SELL_SHORT'):
+            acc = entry_fees.setdefault(pid, [0.0, []])
+            acc[0] += fee
+            acc[1].extend(details)
+    conn.close()
+
+    pos = load_positions()
+    df = load_df_with_pnl()
+    _card_ctx = {
+        'notes': notes,
+        'meta': meta,
+        'last_close': last_close,
+        'entry_fees': {pid: (v[0], v[1]) for pid, v in entry_fees.items()},
+        'positions': {r['position_id']: r for r in pos.to_dict('records')} if not pos.empty else {},
+        'fills': {pid: g for pid, g in df.groupby('position_id')} if not df.empty else {},
+    }
+    return _card_ctx
+
+
+def _notes_changed():
+    """Notes/tags/images edited: refresh card lookups and let the Journal AI re-index notes."""
+    invalidate_cache()
+    if DEEPSEEK_API_KEY:
+        import rag
+        rag.mark_dirty()
 
 
 def now_et() -> pd.Timestamp:
@@ -996,11 +1003,8 @@ def trigger_sync():
         assign_position_ids()
         _write_position_pnl()
         if DEEPSEEK_API_KEY:
-            try:
-                import rag
-                threading.Thread(target=rag.build_index, kwargs={'force': True}, daemon=True).start()
-            except Exception:
-                pass
+            import rag
+            rag.mark_dirty()   # trade-note headers may have changed; re-embedded on the next search
         return jsonify({"status": "success", "message": "Sync completed"}), 200
     return jsonify({"status": "error", "message": "Sync failed, check console"}), 500
 
@@ -1023,6 +1027,7 @@ def update_trade_tags(trade_id):
     cur = conn.execute('UPDATE trades SET tags=? WHERE order_id=?', (tags_json, trade_id))
     conn.commit()
     conn.close()
+    invalidate_cache()
     if cur.rowcount == 0:
         return jsonify({'status': 'error', 'message': 'trade not found'}), 404
     return jsonify({'status': 'success', 'tags': tags}), 200
@@ -1570,6 +1575,7 @@ def save_note(trade_id: str):
     )
     conn.commit()
     conn.close()
+    _notes_changed()
     return jsonify({"status": "success", "message": "Note saved"}), 200
 
 
@@ -1610,6 +1616,7 @@ def upload_image(trade_id: str):
     conn.commit()
     conn.close()
 
+    invalidate_cache()
     return jsonify({
         "status":   "success",
         "filename": filename,
@@ -1638,6 +1645,7 @@ def delete_image(trade_id: str, filename: str):
     file_path = os.path.join(UPLOAD_DIR, filename)
     if os.path.exists(file_path):
         os.remove(file_path)
+    invalidate_cache()
     return jsonify({"status": "success"}), 200
 
 
@@ -1679,6 +1687,7 @@ def save_daily_note(date: str):
     )
     conn.commit()
     conn.close()
+    _notes_changed()
     return jsonify({"status": "success"}), 200
 
 
@@ -1687,6 +1696,7 @@ def save_daily_note(date: str):
 # ── Session store ────────────────────────────────────────────────────────────
 _sessions: dict = {}          # session_id → {"history": [...], "ts": float}
 _SESSION_TTL    = 3600        # 1 hour idle timeout
+_SESSION_MAX    = 50          # oldest idle session is evicted beyond this
 
 
 def _get_history(session_id: str) -> list:
@@ -1694,6 +1704,8 @@ def _get_history(session_id: str) -> list:
     # Purge expired sessions
     for k in [k for k, v in _sessions.items() if now - v["ts"] > _SESSION_TTL]:
         del _sessions[k]
+    while len(_sessions) >= _SESSION_MAX and session_id not in _sessions:
+        del _sessions[min(_sessions, key=lambda k: _sessions[k]["ts"])]
     if session_id not in _sessions:
         _sessions[session_id] = {"history": [], "ts": now}
     _sessions[session_id]["ts"] = now
@@ -2021,6 +2033,10 @@ def get_sector_detail():
             'closes_50d':    closes_50d,
         }
 
+        if len(_detail_cache) >= DETAIL_CACHE_MAX and ticker not in _detail_cache:
+            oldest = min(_detail_cache_time, key=_detail_cache_time.get)
+            _detail_cache.pop(oldest, None)
+            _detail_cache_time.pop(oldest, None)
         _detail_cache[ticker]      = payload
         _detail_cache_time[ticker] = _time.time()
         return jsonify(payload), 200
@@ -2493,13 +2509,8 @@ if __name__ == '__main__':
     print("Backend Server Running")
     assign_position_ids()
     _write_position_pnl()
-    # Kick off RAG index build in background (non-blocking)
-    if DEEPSEEK_API_KEY:
-        try:
-            import rag
-            rag.init_async()
-            print("RAG index building in background...")
-        except Exception as e:
-            print(f"RAG init skipped: {e}")
-    # Default to loopback: remote access goes through `tailscale serve`, never a public port
-    app.run(host=os.environ.get('VENCH_HOST', '127.0.0.1'), port=int(os.environ.get('VENCH_PORT', '5001')))
+    # Default to loopback: remote access goes through `tailscale serve`, never a public port.
+    # waitress (pure-Python WSGI server) streams the Journal AI's SSE responses unbuffered.
+    from waitress import serve
+    serve(app, host=os.environ.get('VENCH_HOST', '127.0.0.1'),
+          port=int(os.environ.get('VENCH_PORT', '5001')), threads=8)
