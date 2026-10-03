@@ -5,6 +5,12 @@ os.environ["PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION"] = "python"
 from dotenv import load_dotenv
 load_dotenv()  # loads .env from current directory
 import uuid
+import io
+import csv
+import math
+import subprocess
+import mimetypes
+mimetypes.add_type('application/manifest+json', '.webmanifest')
 import json
 import atexit
 import time as _time
@@ -14,13 +20,31 @@ from datetime import datetime, timedelta
 import sqlite3
 import pandas as pd
 from flask import Flask, request, jsonify, send_from_directory, Response, stream_with_context
+from flask.json.provider import DefaultJSONProvider
 from flask_cors import CORS
 from moomoo import *
 from flask import Response, stream_with_context  # re-import after moomoo to avoid shadowing
 from datetime import datetime, timedelta  # re-import: `from moomoo import *` shadows datetime
 import positions as P
 
+class _NaNSafeJSON(DefaultJSONProvider):
+    """Serialise NaN/inf as null: bare NaN is not valid JSON and breaks JSON.parse in browsers."""
+    @staticmethod
+    def _clean(obj):
+        if isinstance(obj, float) and not math.isfinite(obj):
+            return None
+        if isinstance(obj, dict):
+            return {k: _NaNSafeJSON._clean(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [_NaNSafeJSON._clean(v) for v in obj]
+        return obj
+
+    def dumps(self, obj, **kwargs):
+        return super().dumps(self._clean(obj), **kwargs)
+
+
 app = Flask(__name__)
+app.json = _NaNSafeJSON(app)
 # Only our own web front-ends may call the API from a browser (comma-separated origins)
 CORS(app, origins=[o.strip() for o in os.environ.get('CORS_ORIGINS', 'http://localhost:5173').split(',') if o.strip()])
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
@@ -212,9 +236,21 @@ def init_db():
         )
     ''')
 
-    # initial_stop is locked at the first stop ever set (defines 1R); stop_price is the current stop
-    _add_column_if_missing(conn, 'position_stops', 'initial_stop', 'REAL')
-    conn.execute('UPDATE position_stops SET initial_stop = stop_price WHERE initial_stop IS NULL')
+    # Standardised R comes only from the live trading system's R ledger (one fixed 1R unit per
+    # trade, see refresh_r_ledger); this table mirrors it, keyed by the shared position id
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS r_ledger (
+            position_id    TEXT PRIMARY KEY,
+            ticker         TEXT NOT NULL,
+            direction      TEXT NOT NULL,
+            open_date      TEXT NOT NULL,
+            close_date     TEXT NOT NULL,
+            net_pnl        REAL NOT NULL,
+            initial_1r_usd REAL NOT NULL,
+            realized_r     REAL NOT NULL,
+            r_source       TEXT NOT NULL
+        )
+    ''')
 
     # Broker-reconciled closes: after this order the broker shows the ticker flat even though the
     # order history leaves a small residue (fractional shares moved outside of orders)
@@ -229,7 +265,7 @@ def init_db():
 
     # position_pnl is fully derived (rebuilt on every sync) — recreate it when the schema is old
     pnl_cols = {row[1] for row in conn.execute('PRAGMA table_info(position_pnl)')}
-    if pnl_cols and 'status' not in pnl_cols:
+    if pnl_cols and 'initial_1r_usd' not in pnl_cols:
         conn.execute('DROP VIEW IF EXISTS ticker_pnl')
         conn.execute('DROP TABLE position_pnl')
     conn.execute('''
@@ -242,8 +278,8 @@ def init_db():
             is_win       INTEGER,
             entry_qty    REAL NOT NULL,
             avg_entry    REAL NOT NULL,
-            initial_stop REAL,
-            r_multiple   REAL,
+            r_multiple     REAL,
+            initial_1r_usd REAL,
             open_time    TEXT,
             close_time   TEXT
         )
@@ -445,11 +481,10 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
         fee_details.extend(entry_details)
 
     # Position-level facts (stops, status, R) come from the position engine
-    stop_price = initial_stop = position_r = position_status = None
+    stop_price = position_r = position_status = None
     p = ctx['positions'].get(position_id)
     if p is not None:
         stop_price      = None if pd.isna(p['stop_price']) else float(p['stop_price'])
-        initial_stop    = None if pd.isna(p['initial_stop']) else float(p['initial_stop'])
         position_status = p['status']
         position_r      = p['r_multiple']
 
@@ -458,6 +493,7 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
 
     return {
         "trade_id":     trade_id,
+        "exit_date":    exit_time.strftime('%Y-%m-%d'),
         "day":          exit_time.strftime('%d'),
         "month":        exit_time.strftime('%b'),
         "ticker":       clean_name,
@@ -475,7 +511,6 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
         "tags":         saved_tags,
         "position_id":  position_id,
         "stop_price":   stop_price,
-        "initial_stop": initial_stop,
         "position_status": position_status,
         "r_multiple":   position_r if is_final_close and position_status == 'closed' else None,
         "price":        float(row['price']),
@@ -545,6 +580,75 @@ def _card_context() -> dict:
     return _card_ctx
 
 
+# ── R ledger (standardised 1R per trade, owned by the live trading system) ──────────────────
+# Read over SSH with a key the trading server restricts to printing the ledger file (forced
+# command), so this journal has read-only access and the trading system never depends on it.
+R_LEDGER_SSH      = os.environ.get('R_LEDGER_SSH', '')        # user@host of the trading server
+R_LEDGER_SSH_KEY  = os.environ.get('R_LEDGER_SSH_KEY', '')
+R_LEDGER_TTL_SECS = 600
+_r_ledger_lock    = threading.Lock()
+_r_ledger_status  = {'ok': None, 'message': 'not fetched yet', 'fetched_at': None, 'trades': 0}
+_r_ledger_last_try = 0.0
+
+
+def refresh_r_ledger(force: bool = False) -> None:
+    """Replace the local r_ledger mirror with the trading server's ledger. On failure the last
+    good copy is kept and the error is reported through r_ledger_status."""
+    global _r_ledger_last_try, _positions_cache, _card_ctx
+    if not R_LEDGER_SSH:
+        _r_ledger_status.update(ok=False, message='R ledger source not configured (R_LEDGER_SSH)')
+        return
+    with _r_ledger_lock:
+        if not force and _time.time() - _r_ledger_last_try < R_LEDGER_TTL_SECS:
+            return
+        _r_ledger_last_try = _time.time()
+        try:
+            cmd = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+                   '-o', 'StrictHostKeyChecking=accept-new']
+            if R_LEDGER_SSH_KEY:
+                cmd += ['-i', R_LEDGER_SSH_KEY]
+            out = subprocess.run(cmd + [R_LEDGER_SSH], capture_output=True, text=True, timeout=30)
+            if out.returncode != 0:
+                raise RuntimeError(out.stderr.strip()[-300:] or f'ssh exited {out.returncode}')
+            rows = list(csv.DictReader(io.StringIO(out.stdout)))
+            if not out.stdout.startswith('close_date') or (rows and 'position_id' not in rows[0]):
+                raise RuntimeError('unexpected ledger format')
+            conn = sqlite3.connect(DB_FILE)
+            with conn:
+                conn.execute('DELETE FROM r_ledger')
+                conn.executemany(
+                    'INSERT INTO r_ledger (position_id, ticker, direction, open_date, close_date, '
+                    'net_pnl, initial_1r_usd, realized_r, r_source) VALUES (?,?,?,?,?,?,?,?,?)',
+                    [(r['position_id'], r['ticker'], r['direction'], r['open_date'], r['close_date'],
+                      float(r['net_pnl']), float(r['initial_1r_usd']), float(r['realized_r']),
+                      r['r_source']) for r in rows],
+                )
+            conn.close()
+            _positions_cache = None
+            _card_ctx = None
+            _r_ledger_status.update(ok=True, message='ok', trades=len(rows),
+                                    fetched_at=datetime.now().isoformat(timespec='seconds'))
+            print(f"[r_ledger] {len(rows)} trades")
+        except Exception as e:
+            _r_ledger_status.update(ok=False, message=f'fetch failed: {e}')
+            print(f"[r_ledger] {_r_ledger_status['message']}")
+
+
+def _refresh_r_ledger_in_background():
+    """Called on reads: refresh when stale without making the request wait for SSH."""
+    if R_LEDGER_SSH and _time.time() - _r_ledger_last_try >= R_LEDGER_TTL_SECS:
+        threading.Thread(target=refresh_r_ledger, daemon=True).start()
+
+
+def ledger_rows(period: str = 'AT') -> pd.DataFrame:
+    """R-ledger trades whose close date falls in the period."""
+    conn = sqlite3.connect(DB_FILE)
+    rows = pd.read_sql_query('SELECT * FROM r_ledger ORDER BY close_date', conn)
+    conn.close()
+    rows['create_time'] = pd.to_datetime(rows['close_date'])
+    return slice_by_period(rows, period)
+
+
 def _notes_changed():
     """Notes/tags/images edited: refresh card lookups and let the Journal AI re-index notes."""
     invalidate_cache()
@@ -561,6 +665,7 @@ def now_et() -> pd.Timestamp:
 def load_positions() -> pd.DataFrame:
     """One row per position (open and closed) with net P&L, initial/current stop and R multiple."""
     global _positions_cache
+    _refresh_r_ledger_in_background()
     if _positions_cache is not None:
         return _positions_cache.copy()
 
@@ -569,16 +674,17 @@ def load_positions() -> pd.DataFrame:
         return pd.DataFrame()
     conn = sqlite3.connect(DB_FILE)
     resets = load_resets(conn)
-    stops = pd.read_sql_query(
-        'SELECT position_id, stop_price, initial_stop FROM position_stops', conn
+    stops = pd.read_sql_query('SELECT position_id, stop_price FROM position_stops', conn)
+    ledger = pd.read_sql_query(
+        'SELECT position_id, realized_r AS r_multiple, initial_1r_usd, r_source FROM r_ledger', conn
     )
     conn.close()
 
-    summary = P.summarize(df, resets).merge(stops, on='position_id', how='left')
-    summary['r_multiple'] = [
-        P.r_multiple(r.net_pnl, r.avg_entry, r.initial_stop, r.entry_qty, r.multiplier)
-        for r in summary.itertuples()
-    ]
+    summary = (P.summarize(df, resets)
+               .merge(stops, on='position_id', how='left')
+               .merge(ledger, on='position_id', how='left'))
+    # object dtype keeps "no R" as None (a float column would carry NaN)
+    summary['r_multiple'] = summary['r_multiple'].astype(object).where(summary['r_multiple'].notna(), None)
     summary['is_win'] = summary['net_pnl'] > 0
     _positions_cache = summary
     return summary.copy()
@@ -655,7 +761,7 @@ def _write_position_pnl():
         conn.execute("DELETE FROM position_pnl")
         conn.executemany(
             "INSERT INTO position_pnl (position_id, code, direction, status, realized_pnl, is_win, "
-            "entry_qty, avg_entry, initial_stop, r_multiple, open_time, close_time) "
+            "entry_qty, avg_entry, r_multiple, initial_1r_usd, open_time, close_time) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
@@ -663,8 +769,8 @@ def _write_position_pnl():
                     round(float(r.net_pnl), 2),
                     int(r.net_pnl > 0) if r.status == 'closed' else None,
                     float(r.entry_qty), round(float(r.avg_entry), 4),
-                    None if pd.isna(r.initial_stop) else float(r.initial_stop),
                     r.r_multiple,
+                    None if pd.isna(r.initial_1r_usd) else float(r.initial_1r_usd),
                     str(r.open_time),
                     None if pd.isna(r.close_time) else str(r.close_time),
                 )
@@ -896,20 +1002,21 @@ R_BUCKETS = [(-float('inf'), -2, '≤ -2R'), (-2, -1, '-2R ~ -1R'), (-1, 0, '-1R
              (0, 1, '0 ~ 1R'), (1, 2, '1R ~ 2R'), (2, 3, '2R ~ 3R'), (3, float('inf'), '≥ 3R')]
 
 
-def r_stats(cp: pd.DataFrame) -> dict:
-    """Expectancy and distribution in R, over closed positions that have an initial stop."""
-    rs = cp['r_multiple'].dropna().astype(float) if not cp.empty else pd.Series(dtype=float)
+def r_stats(rows: pd.DataFrame) -> dict:
+    """Expectancy and distribution in standardised R, from the trading system's R ledger."""
+    rs = rows['realized_r'].astype(float) if not rows.empty else pd.Series(dtype=float)
+    base = {"source": "R ledger", "ledger": dict(_r_ledger_status), "count": int(len(rs))}
     if rs.empty:
-        return {"count": 0, "coverage": f"0/{len(cp)}", "expectancy_r": None,
-                "avg_win_r": None, "avg_loss_r": None, "total_r": None, "distribution": []}
+        return {**base, "expectancy_r": None, "avg_win_r": None, "avg_loss_r": None,
+                "total_r": None, "win_rate": None, "distribution": []}
     wins, losses = rs[rs > 0], rs[rs <= 0]
     return {
-        "count":        int(len(rs)),
-        "coverage":     f"{len(rs)}/{len(cp)}",
+        **base,
         "expectancy_r": round(float(rs.mean()), 2),
         "avg_win_r":    round(float(wins.mean()), 2) if len(wins) else None,
         "avg_loss_r":   round(float(losses.mean()), 2) if len(losses) else None,
         "total_r":      round(float(rs.sum()), 2),
+        "win_rate":     round(len(wins) / len(rs), 4),
         "distribution": [
             {"label": label, "count": int(((rs > lo) & (rs <= hi)).sum()) if lo != -float('inf') else int((rs <= hi).sum())}
             for lo, hi, label in R_BUCKETS
@@ -928,13 +1035,23 @@ def daily_pnl_series(df: pd.DataFrame) -> pd.Series:
 
 # ======================== API Routes ========================
 
-@app.route('/')
-def home():
-    try:
-        with open('index.html', 'r', encoding='utf-8') as f:
-            return f.read()
-    except FileNotFoundError:
-        return "Missing index.html", 404
+# Built web front end (web/dist), served from the same origin as the API
+WEB_DIST = os.environ.get('VENCH_WEB_DIST', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web_dist'))
+
+
+@app.route('/', defaults={'path': ''})
+@app.route('/<path:path>')
+def web_app(path: str):
+    """Static assets by path; every other non-API path gets index.html (client-side routing)."""
+    if path.startswith('api/'):
+        return jsonify({"status": "error", "message": "Not found"}), 404
+    if path and os.path.isfile(os.path.join(WEB_DIST, path)):
+        return send_from_directory(WEB_DIST, path)
+    if not os.path.isfile(os.path.join(WEB_DIST, 'index.html')):
+        return "Web front end not deployed", 404
+    resp = send_from_directory(WEB_DIST, 'index.html')
+    resp.headers['Cache-Control'] = 'no-cache'   # always pick up a new build; assets are content-hashed
+    return resp
 
 
 @app.route('/api/portfolio', methods=['GET'])
@@ -979,7 +1096,6 @@ def get_portfolio():
                 op = open_pos.get(row['ticker'].upper())
                 row['position_id']  = op.position_id if op else None
                 row['stop_price']   = None if not op or pd.isna(op.stop_price) else float(op.stop_price)
-                row['initial_stop'] = None if not op or pd.isna(op.initial_stop) else float(op.initial_stop)
 
         return jsonify({"status": "success", "data": rows}), 200
     except Exception as e:
@@ -1000,6 +1116,7 @@ def trigger_sync():
         }), 429
     if sync_trades_to_db():
         _last_sync_time = time.time()
+        refresh_r_ledger(force=True)
         assign_position_ids()
         _write_position_pnl()
         if DEEPSEEK_API_KEY:
@@ -1035,44 +1152,34 @@ def update_trade_tags(trade_id):
 
 @app.route('/api/positions/<position_id>/stop', methods=['PATCH'])
 def set_position_stop(position_id):
-    """Set the current stop. The first stop ever set becomes the initial stop (defines 1R) and is
-    not changed by later moves; pass `initial_stop` explicitly only to correct it.
-    """
+    """Record the position's current stop (journal reference only; R comes from the R ledger)."""
     body       = request.get_json(force=True)
     stop_price = float(body.get('stop_price', 0))
     ticker     = body.get('ticker', '')
-    initial    = body.get('initial_stop')
-
     conn = sqlite3.connect(DB_FILE)
     conn.execute('''
-        INSERT INTO position_stops (position_id, ticker, stop_price, initial_stop, updated_at)
-        VALUES (?, ?, ?, COALESCE(?, ?), ?)
+        INSERT INTO position_stops (position_id, ticker, stop_price, updated_at)
+        VALUES (?, ?, ?, ?)
         ON CONFLICT(position_id) DO UPDATE SET
-            stop_price   = excluded.stop_price,
-            initial_stop = COALESCE(?, position_stops.initial_stop, excluded.stop_price),
-            updated_at   = excluded.updated_at
-    ''', (position_id, ticker, stop_price, initial, stop_price, datetime.now().isoformat(), initial))
-    row = conn.execute(
-        'SELECT stop_price, initial_stop FROM position_stops WHERE position_id=?', (position_id,)
-    ).fetchone()
+            stop_price = excluded.stop_price,
+            updated_at = excluded.updated_at
+    ''', (position_id, ticker, stop_price, datetime.now().isoformat()))
     conn.commit()
     conn.close()
     invalidate_cache()
-    _write_position_pnl()
-    return jsonify({'status': 'success', 'position_id': position_id,
-                    'stop_price': row[0], 'initial_stop': row[1]}), 200
+    return jsonify({'status': 'success', 'position_id': position_id, 'stop_price': stop_price}), 200
 
 
 @app.route('/api/positions/<position_id>/stop', methods=['GET'])
 def get_position_stop(position_id):
     conn = sqlite3.connect(DB_FILE)
     row  = conn.execute(
-        'SELECT stop_price, initial_stop FROM position_stops WHERE position_id=?', (position_id,)
+        'SELECT stop_price FROM position_stops WHERE position_id=?', (position_id,)
     ).fetchone()
     conn.close()
     if row:
-        return jsonify({'status': 'success', 'stop_price': row[0], 'initial_stop': row[1]}), 200
-    return jsonify({'status': 'not_found', 'stop_price': None, 'initial_stop': None}), 200
+        return jsonify({'status': 'success', 'stop_price': row[0]}), 200
+    return jsonify({'status': 'not_found', 'stop_price': None}), 200
 
 
 @app.route('/api/tags', methods=['GET'])
@@ -1397,7 +1504,8 @@ def get_monthly_details():
     cp = closed_positions('AT')
     month_cp = cp[cp['close_time'].dt.strftime('%B, %Y') == month_str] if not cp.empty else cp
     stats = deep_stats(month_cp)
-    stats["r"] = r_stats(month_cp)
+    lr = ledger_rows('AT')
+    stats["r"] = r_stats(lr[lr['create_time'].dt.strftime('%B, %Y') == month_str] if not lr.empty else lr)
 
     # Full trade log
     month_trades_list = [
@@ -1525,7 +1633,7 @@ def get_performance():
             "sortino_ratio":       sortino_ratio,
             "kelly_pct":           kelly_pct,
         },
-        "r_stats":        r_stats(cp),
+        "r_stats":        r_stats(ledger_rows(period)),
         "monthly_bars":   monthly_bars,
         "dow_stats":      dow_stats,
         "deep_stats":     deep_stats(cp),
@@ -2416,9 +2524,6 @@ def get_holding_trades(ticker):
         summary = load_positions()
         match = summary[summary['position_id'] == pid_used] if not summary.empty else summary
         r_multiple   = match.iloc[0]['r_multiple'] if not match.empty else None
-        initial_stop = None
-        if not match.empty and not pd.isna(match.iloc[0]['initial_stop']):
-            initial_stop = float(match.iloc[0]['initial_stop'])
 
         result = []
         for _, row in target_df.iterrows():
@@ -2456,7 +2561,6 @@ def get_holding_trades(ticker):
             'total_net_pnl':  total_net_pnl,
             'entry_price':    round(entry_price, 4),
             'stop_price':     stop_price,
-            'initial_stop':   initial_stop,
             'r_multiple':     r_multiple,
         }), 200
 
@@ -2507,6 +2611,7 @@ def get_account():
 
 if __name__ == '__main__':
     print("Backend Server Running")
+    refresh_r_ledger(force=True)
     assign_position_ids()
     _write_position_pnl()
     # Default to loopback: remote access goes through `tailscale serve`, never a public port.

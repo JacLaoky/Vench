@@ -25,3 +25,6 @@ trade_images/
 .claude/
 
 notes.txt
+
+# Built web front end copied next to the backend for deployment
+backend/web_dist/

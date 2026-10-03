@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react'
 import { Bot, Send, X, ChevronDown, RotateCcw, Trash2 } from 'lucide-react'
+import { api } from '../api'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -16,8 +17,6 @@ const SUGGESTIONS = [
 
 // Stable session ID per browser tab (cleared on tab close)
 const SESSION_ID = `session_${Date.now()}_${Math.random().toString(36).slice(2)}`
-
-const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:5001'
 
 export default function JournalAI() {
   const [open, setOpen]         = useState(false)
@@ -42,7 +41,8 @@ export default function JournalAI() {
     setMessages(prev => [...prev, { role: 'assistant', content: '', streaming: true }])
 
     try {
-      const res = await fetch(`${API_BASE}/api/journal/ask/stream`, {
+      // fetch (not axios) because the reply is a streamed SSE body
+      const res = await fetch(api.journalStreamUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ question: q, session_id: SESSION_ID }),
@@ -113,7 +113,7 @@ export default function JournalAI() {
   async function reindex() {
     setReindexing(true)
     try {
-      await fetch(`${API_BASE}/api/journal/reindex`, { method: 'POST' })
+      await api.journalReindex()
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: '✅ 索引已重建，最新的笔记已经可以搜索了。',
@@ -126,19 +126,20 @@ export default function JournalAI() {
   }
 
   async function clearSession() {
-    await fetch(`${API_BASE}/api/journal/session/clear`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: SESSION_ID }),
-    }).catch(() => {})
-    setMessages([])
+    try {
+      await api.journalClear(SESSION_ID)
+      setMessages([])
+    } catch {
+      // keep the transcript visible: the server still remembers this conversation
+      setMessages(prev => [...prev, { role: 'assistant', content: '⚠️ 清空对话失败，请稍后重试。' }])
+    }
   }
 
   return (
-    <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-2">
+    <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 sm:bottom-6 sm:right-6 z-50 flex flex-col items-end gap-2">
 
       {open && (
-        <div className="w-[380px] max-h-[560px] bg-[#12141e] border border-white/10 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+        <div className="w-[calc(100vw-2rem)] sm:w-[380px] max-h-[70vh] sm:max-h-[560px] bg-[#12141e] border border-white/10 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
 
           {/* Header */}
           <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-[#1a1d2e]">

@@ -1,6 +1,9 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useState, useCallback } from 'react'
 import { X } from 'lucide-react'
 import { api } from '../api'
+import { useApi } from '../lib/useApi'
+import { fmtR, rColor } from '../lib/format'
+import type { RStats } from '../types'
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Cell, ReferenceLine
@@ -15,6 +18,7 @@ interface Summary {
 }
 interface PerfData {
   summary: Summary
+  r_stats: RStats
   monthly_bars: { label: string; value: number; isProfit: boolean }[]
   dow_stats: { label: string; pnl: number; trades: number; win_rate: number; isProfit: boolean }[]
   drawdown_curve: { date: string; drawdown: number; equity: number }[]
@@ -212,28 +216,61 @@ function SymbolRanking({
   )
 }
 
-export default function Performance() {
-  const [data, setData] = useState<PerfData | null>(null)
-  const [tf, setTf] = useState('AT')
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [selectedSymbol, setSelectedSymbol] = useState<SymbolSummary | null>(null)
-  const [allTrades, setAllTrades] = useState<SymbolTrade[]>([])
+function RSection({ r }: { r: RStats }) {
+  const ledgerNote = r?.ledger?.ok === false
+    ? <p className="text-xs text-amber-300 mt-1">R ledger unavailable ({r.ledger.message}); showing the last synced copy.</p>
+    : null
+  if (!r || r.count === 0) {
+    return (
+      <div className="bg-white/5 rounded-xl border border-white/10 p-4 mb-6">
+        <h2 className="text-sm font-medium text-white mb-1">R Multiples</h2>
+        <p className="text-xs text-slate-500">No R-ledger trades closed in this period.</p>
+        {ledgerNote}
+      </div>
+    )
+  }
+  return (
+    <div className="bg-white/5 rounded-xl border border-white/10 p-4 mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 mb-4">
+        <h2 className="text-sm font-medium text-white whitespace-nowrap">R Multiples</h2>
+        <span className="text-xs text-slate-500">
+          {r.count} trades · standardised 1R ledger{r.win_rate !== null ? ` · ${Math.round(r.win_rate * 100)}% win` : ''}
+        </span>
+      </div>
+      {ledgerNote}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
+        <MetricCard label="Expectancy" value={fmtR(r.expectancy_r)} color={rColor(r.expectancy_r)} sub="avg R per trade" />
+        <MetricCard label="Avg Win" value={fmtR(r.avg_win_r)} color="text-emerald-400" />
+        <MetricCard label="Avg Loss" value={fmtR(r.avg_loss_r)} color="text-red-400" />
+        <MetricCard label="Total" value={fmtR(r.total_r)} color={rColor(r.total_r)} />
+      </div>
+      <ResponsiveContainer width="100%" height={160}>
+        <BarChart data={r.distribution}>
+          <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+          <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} width={24} />
+          <Tooltip cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+            contentStyle={{ background: '#1a1d27', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }} />
+          <Bar dataKey="count" name="Positions" radius={[4, 4, 0, 0]}>
+            {r.distribution.map((d, i) => <Cell key={i} fill={d.label.startsWith('-') || d.label.startsWith('≤') ? '#f87171' : '#34d399'} />)}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  )
+}
 
-  useEffect(() => {
-    setLoading(true)
-    Promise.all([api.getPerformance(tf), api.getAllTrades()])
-      .then(([perf, trades]) => {
-        setData(perf)
-        setAllTrades(trades.data ?? [])
-      })
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [tf])
+export default function Performance() {
+  const [tf, setTf] = useState('AT')
+  const [selectedSymbol, setSelectedSymbol] = useState<SymbolSummary | null>(null)
+  const { data: loaded, error, loading } = useApi(
+    () => Promise.all([api.getPerformance(tf) as Promise<PerfData>, api.getAllTrades()]), [tf],
+  )
+  const data = loaded?.[0] ?? null
+  const allTrades = (loaded?.[1].data ?? []) as unknown as SymbolTrade[]
 
   const openSymbol = useCallback((s: SymbolSummary) => setSelectedSymbol(s), [])
 
-  if (loading) return <div className="text-slate-500 text-sm">Loading…</div>
+  if (loading && !data) return <div className="text-slate-500 text-sm">Loading…</div>
   if (error) return <div className="text-red-400 text-sm">Error: {error}</div>
   if (!data) return null
 
@@ -242,8 +279,8 @@ export default function Performance() {
 
   return (
     <div>
-      <div className="flex items-center justify-between mb-6">
-        <h1 className="text-xl font-semibold text-white">Performance</h1>
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-6">
+        <h1 className="text-xl font-semibold text-white">Performance{loading && <span className="text-xs text-slate-500 font-normal ml-2">updating…</span>}</h1>
         <div className="flex gap-1 bg-white/5 rounded-lg p-1">
           {TIMEFRAMES.map(t => (
             <button key={t} onClick={() => setTf(t)}
@@ -280,6 +317,8 @@ export default function Performance() {
           sub={`Best W: ${s.max_win_streak}  Best L: ${s.max_loss_streak}`}
         />
       </div>
+
+      <RSection r={data.r_stats} />
 
       {/* Charts row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">

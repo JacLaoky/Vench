@@ -114,11 +114,3 @@ def summarize(df: pd.DataFrame, resets=frozenset()) -> pd.DataFrame:
             'legs': len(grp),
         })
     return pd.DataFrame(rows)
-
-
-def r_multiple(net_pnl: float, avg_entry: float, initial_stop, entry_qty: float, mult: float):
-    """Net P&L in units of the risk taken at entry: |entry − initial stop| × shares × multiplier."""
-    if initial_stop is None or pd.isna(initial_stop) or not avg_entry:
-        return None
-    risk = abs(avg_entry - float(initial_stop)) * entry_qty * mult
-    return round(net_pnl / risk, 2) if risk > 0.001 else None
