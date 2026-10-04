@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, BookOpen, BarChart2, TrendingUp,
-  Calendar, Activity, List, Calculator, RefreshCw, Waves, Menu, X, Tags, RotateCw,
+  Calendar, Activity, List, Calculator, RefreshCw, Waves, Menu, X, Tags, RotateCw, Table2,
 } from 'lucide-react'
 import { api } from '../api'
 
@@ -12,6 +12,7 @@ const nav = [
   { to: '/all-trades',  label: 'All Trades',   icon: List },
   { to: '/stats',       label: 'Stats',        icon: BarChart2 },
   { to: '/performance', label: 'Performance',  icon: Activity },
+  { to: '/recap',       label: 'Recap',        icon: Table2 },
   { to: '/tags',        label: 'Tags',         icon: Tags },
   { to: '/sectors',     label: 'Sectors',      icon: TrendingUp },
   { to: '/breadth',     label: 'Breadth',      icon: Waves },

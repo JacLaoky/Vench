@@ -158,3 +158,33 @@ export interface SectorDetail {
   week52_high: number
   week52_high_pct: number
 }
+
+export interface RecapStats {
+  trades: number
+  wins: number
+  losses: number
+  win_pct: number | null
+  loss_pct: number | null
+  avg_gain_pct: number | null
+  avg_loss_pct: number | null
+  largest_gain_pct: number | null
+  largest_loss_pct: number | null
+  avg_days_gain: number | null
+  avg_days_loss: number | null
+  net_pnl: number
+  avg_r: number | null
+  /** swing scope only */
+  return_pct?: number
+  cumulative_pct?: number
+  capital_start?: number
+}
+
+export interface RecapResponse {
+  status: string
+  scope: 'swing' | 'all'
+  year: number
+  years: number[]
+  months: (RecapStats & { month: string })[]
+  summary: RecapStats
+  pool: { initial_base: number; pnl_offset: number; current: number; updated_at: string | null } | null
+}

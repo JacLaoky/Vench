@@ -1,6 +1,6 @@
 import axios from 'axios'
 import type {
-  Account, DeepStats, HoldingDetail, JournalResponse, Position, RStats, SectorDetail, TagCount, TagStat, Trade,
+  Account, DeepStats, HoldingDetail, JournalResponse, Position, RecapResponse, RStats, SectorDetail, TagCount, TagStat, Trade,
 } from './types'
 
 /** Same origin in production (Flask serves the build); the Vite dev server proxies /api. */
@@ -31,6 +31,8 @@ export const api = {
   getMonthDetail:      (month: string) =>
     get<{ status: string; data?: DeepStats & { r: RStats }; trades?: Trade[] }>('/monthly_details', { month }),
   getSectorDetail:     (ticker: string) => get<SectorDetail>('/sector_detail', { ticker }),
+  getRecap:            (scope: 'swing' | 'all', year?: number) =>
+    get<RecapResponse>('/recap', { scope, ...(year ? { year } : {}) }),
   getPerformance:      (period = 'AT') => get('/performance', { period }),
   getSectors:          (type?: string, period = '1D') => get('/sectors', { period, ...(type ? { type } : {}) }),
   getMarketBreadth:    (period = '1D') => get('/market_breadth', { period }),

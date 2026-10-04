@@ -263,6 +263,17 @@ def init_db():
         )
     ''')
 
+    # The right-side strategy's capital pool (from the trading system): base for swing returns
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS swing_pool (
+            id           INTEGER PRIMARY KEY CHECK (id = 1),
+            initial_base REAL NOT NULL,
+            pnl_offset   REAL NOT NULL,
+            base         REAL NOT NULL,
+            updated_at   TEXT
+        )
+    ''')
+
     # position_pnl is fully derived (rebuilt on every sync) — recreate it when the schema is old
     pnl_cols = {row[1] for row in conn.execute('PRAGMA table_info(position_pnl)')}
     if pnl_cols and 'initial_1r_usd' not in pnl_cols:
@@ -610,9 +621,11 @@ def refresh_r_ledger(force: bool = False) -> None:
             out = subprocess.run(cmd + [R_LEDGER_SSH], capture_output=True, text=True, timeout=30)
             if out.returncode != 0:
                 raise RuntimeError(out.stderr.strip()[-300:] or f'ssh exited {out.returncode}')
-            rows = list(csv.DictReader(io.StringIO(out.stdout)))
-            if not out.stdout.startswith('close_date') or (rows and 'position_id' not in rows[0]):
+            ledger_csv, _, pool_json = out.stdout.partition('\n#POOL\n')
+            rows = list(csv.DictReader(io.StringIO(ledger_csv)))
+            if not ledger_csv.startswith('close_date') or (rows and 'position_id' not in rows[0]):
                 raise RuntimeError('unexpected ledger format')
+            pool = json.loads(pool_json) if pool_json.strip() else None
             conn = sqlite3.connect(DB_FILE)
             with conn:
                 conn.execute('DELETE FROM r_ledger')
@@ -623,6 +636,13 @@ def refresh_r_ledger(force: bool = False) -> None:
                       float(r['net_pnl']), float(r['initial_1r_usd']), float(r['realized_r']),
                       r['r_source']) for r in rows],
                 )
+                if pool:
+                    conn.execute(
+                        'INSERT OR REPLACE INTO swing_pool (id, initial_base, pnl_offset, base, updated_at) '
+                        'VALUES (1, ?, ?, ?, ?)',
+                        (float(pool['initial_base']), float(pool['pnl_offset']), float(pool['base']),
+                         pool.get('updated_at')),
+                    )
             conn.close()
             _positions_cache = None
             _card_ctx = None
@@ -1525,6 +1545,99 @@ def get_monthly_details():
         "status": "success",
         "data":   stats,
         "trades": month_trades_list,
+    }), 200
+
+
+# ======================== Yearly recap ========================
+
+def _recap_stats(pos: pd.DataFrame) -> dict:
+    """Per-position outcome stats for one block of closed positions (a month or a year)."""
+    n = len(pos)
+    if n == 0:
+        return {"trades": 0, "wins": 0, "losses": 0, "win_pct": None, "loss_pct": None,
+                "avg_gain_pct": None, "avg_loss_pct": None, "largest_gain_pct": None,
+                "largest_loss_pct": None, "avg_days_gain": None, "avg_days_loss": None,
+                "net_pnl": 0.0, "avg_r": None}
+    pct = (pos['net_pnl'] / pos['entry_cost'].where(pos['entry_cost'] > 0)) * 100
+    days = (pos['close_time'] - pos['open_time']).dt.total_seconds() / 86400
+    won, lost = pos['is_win'], ~pos['is_win']
+    r = pos['realized_r'].dropna() if 'realized_r' in pos else pd.Series(dtype=float)
+
+    def mean(series):
+        return round(float(series.mean()), 2) if len(series.dropna()) else None
+
+    return {
+        "trades":           int(n),
+        "wins":             int(won.sum()),
+        "losses":           int(lost.sum()),
+        "win_pct":          round(won.sum() / n * 100, 1),
+        "loss_pct":         round(lost.sum() / n * 100, 1),
+        "avg_gain_pct":     mean(pct[won]),
+        "avg_loss_pct":     mean(pct[lost]),
+        "largest_gain_pct": round(float(pct.max()), 2) if pct.notna().any() and pct.max() > 0 else None,
+        "largest_loss_pct": round(float(pct.min()), 2) if pct.notna().any() and pct.min() <= 0 else None,
+        "avg_days_gain":    mean(days[won]),
+        "avg_days_loss":    mean(days[lost]),
+        "net_pnl":          round(float(pos['net_pnl'].sum()), 2),
+        "avg_r":            round(float(r.mean()), 2) if len(r) else None,
+    }
+
+
+@app.route('/api/recap', methods=['GET'])
+def get_recap():
+    """Month-by-month recap of a year. scope=swing: right-side trades from the R ledger, with
+    returns on the right-side capital pool; scope=all: every closed position, no returns."""
+    scope = request.args.get('scope', 'swing')
+    pos = load_positions()
+    if pos.empty:
+        return jsonify({"status": "empty", "years": []}), 200
+    closed = pos[pos['status'] == 'closed'].copy()
+
+    conn = sqlite3.connect(DB_FILE)
+    ledger = pd.read_sql_query('SELECT position_id, realized_r, net_pnl AS ledger_net, close_date FROM r_ledger', conn)
+    pool = conn.execute('SELECT initial_base, pnl_offset, base, updated_at FROM swing_pool WHERE id = 1').fetchone()
+    conn.close()
+
+    if scope == 'swing':
+        closed = closed.merge(ledger[['position_id', 'realized_r']], on='position_id', how='inner')
+    years = sorted({int(y) for y in closed['close_time'].dt.year}, reverse=True)
+    year = int(request.args.get('year') or (years[0] if years else now_et().year))
+    in_year = closed[closed['close_time'].dt.year == year]
+
+    # Swing capital at any date = initial pool + (ledger P&L realised before that date − offset)
+    def capital_before(day: pd.Timestamp):
+        if pool is None:
+            return None
+        realised = ledger.loc[pd.to_datetime(ledger['close_date']) < day, 'ledger_net'].sum()
+        return pool[0] + (float(realised) - pool[1])
+
+    months = []
+    year_start_cap = capital_before(pd.Timestamp(year=year, month=1, day=1)) if scope == 'swing' else None
+    for m in range(1, 13):
+        month_pos = in_year[in_year['close_time'].dt.month == m]
+        if month_pos.empty:
+            continue
+        row = {"month": f"{year}-{m:02d}", **_recap_stats(month_pos)}
+        if scope == 'swing' and pool is not None:
+            start = pd.Timestamp(year=year, month=m, day=1)
+            end = start + pd.offsets.MonthBegin(1)
+            cap_start, cap_end = capital_before(start), capital_before(end)
+            row["capital_start"] = round(cap_start, 2)
+            row["return_pct"] = round((cap_end - cap_start) / cap_start * 100, 2)
+            row["cumulative_pct"] = round((cap_end / year_start_cap - 1) * 100, 2)
+        months.append(row)
+
+    summary = _recap_stats(in_year)
+    if scope == 'swing' and pool is not None and year_start_cap:
+        year_end_cap = capital_before(pd.Timestamp(year=year + 1, month=1, day=1))
+        summary["return_pct"] = round((year_end_cap / year_start_cap - 1) * 100, 2)
+        summary["capital_start"] = round(year_start_cap, 2)
+
+    return jsonify({
+        "status": "success", "scope": scope, "year": year, "years": years,
+        "months": months, "summary": summary,
+        "pool": None if pool is None or scope != 'swing' else
+                {"initial_base": pool[0], "pnl_offset": pool[1], "current": pool[2], "updated_at": pool[3]},
     }), 200
 
 
