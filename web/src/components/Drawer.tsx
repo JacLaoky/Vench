@@ -10,9 +10,9 @@ export default function Drawer({ title, subtitle, onClose, children, wide = fals
 }) {
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
-      <div className={`relative w-full ${wide ? 'sm:max-w-2xl' : 'sm:max-w-md'} bg-[#13151f] sm:border-l border-white/10 h-full flex flex-col shadow-2xl pt-[env(safe-area-inset-top)]`}>
-        <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-white/10">
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
+      <div className={`relative w-full ${wide ? 'sm:max-w-2xl' : 'sm:max-w-md'} bg-surface sm:border-l border-line h-full flex flex-col shadow-2xl pt-[env(safe-area-inset-top)]`}>
+        <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-line">
           <div className="min-w-0">
             <h2 className="text-lg font-semibold text-white truncate">{title}</h2>
             {subtitle && <div className="text-xs text-slate-500 mt-0.5">{subtitle}</div>}

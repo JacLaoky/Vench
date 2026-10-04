@@ -3,9 +3,9 @@ import { AlertTriangle } from 'lucide-react'
 import { api } from '../api'
 import { useApi } from '../lib/useApi'
 import { usePersistentState } from '../lib/usePersistentState'
-import { usd } from '../lib/format'
+import { signedUsd, usd } from '../lib/format'
 
-const input = 'mt-1 w-full bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-violet-500'
+const input = 'mt-1 w-full field px-3 py-2 text-sm text-white'
 
 function CapitalField({ capital, setCapital, accountTotal }: {
   capital: number
@@ -79,7 +79,7 @@ function ScaleIn({ accountTotal }: { accountTotal?: number }) {
               <span className="text-xs text-slate-500">Entry price ($)</span>
               <input type="number" inputMode="decimal" step="0.01" value={prices[i] || ''} onChange={e => setPrices(setAt(prices, i, +e.target.value))} className={input} />
             </label>
-            <div className="bg-white/5 rounded-lg px-3 py-2 border border-white/10">
+            <div className="bg-white/[0.03] rounded-lg px-3 py-2 border border-line">
               <p className="text-xs text-slate-500">Shares</p>
               <CopyNumber value={tranches[i].shares} className="block text-white font-semibold" />
               <p className="text-xs text-slate-500">{usd(tranches[i].cost)}</p>
@@ -88,18 +88,18 @@ function ScaleIn({ accountTotal }: { accountTotal?: number }) {
         ))}
       </div>
 
-      <div className="grid grid-cols-3 gap-3 pt-4 border-t border-white/10">
-        <div className="bg-violet-600/10 border border-violet-500/30 rounded-xl p-3">
+      <div className="grid grid-cols-3 gap-3 pt-4 border-t border-line">
+        <div className="bg-violet-500/[0.07] border border-violet-500/20 rounded-xl p-3 min-w-0">
           <p className="text-xs text-slate-500">Total shares</p>
-          <CopyNumber value={totalShares} className="block text-xl font-bold text-white" />
+          <CopyNumber value={totalShares} className="block text-lg sm:text-xl font-semibold tracking-tight text-white" />
         </div>
-        <div className="bg-violet-600/10 border border-violet-500/30 rounded-xl p-3">
+        <div className="bg-violet-500/[0.07] border border-violet-500/20 rounded-xl p-3 min-w-0">
           <p className="text-xs text-slate-500">Avg cost</p>
-          <p className="text-xl font-bold text-white">${avgCost.toFixed(2)}</p>
+          <p className="text-lg sm:text-xl font-semibold tracking-tight text-white">{usd(avgCost)}</p>
         </div>
-        <div className="bg-violet-600/10 border border-violet-500/30 rounded-xl p-3">
+        <div className="bg-violet-500/[0.07] border border-violet-500/20 rounded-xl p-3 min-w-0">
           <p className="text-xs text-slate-500">Total cost</p>
-          <p className="text-xl font-bold text-white">{usd(totalCost)}</p>
+          <p className="text-lg sm:text-xl font-semibold tracking-tight text-white">{usd(totalCost)}</p>
           {capital > 0 && <p className="text-[11px] text-slate-500">{((totalCost / capital) * 100).toFixed(1)}% of capital</p>}
         </div>
       </div>
@@ -136,7 +136,7 @@ function SwingTrade({ accountTotal }: { accountTotal?: number }) {
           <button key={s} onClick={() => setSide(s)}
             className={`px-4 py-1.5 rounded-lg text-sm font-medium transition-colors capitalize ${side === s
               ? s === 'long' ? 'bg-emerald-600 text-white' : 'bg-red-600 text-white'
-              : 'bg-white/5 text-slate-400 hover:text-white'}`}>
+              : 'bg-white/[0.04] border border-line text-slate-400 hover:text-white'}`}>
             {s}
           </button>
         ))}
@@ -150,7 +150,7 @@ function SwingTrade({ accountTotal }: { accountTotal?: number }) {
           <div className="flex gap-1 mt-1">
             {RISK_PRESETS.map(p => (
               <button key={p} type="button" onClick={() => setRiskPct(p)}
-                className={`text-[11px] px-2 py-0.5 rounded ${riskPct === p ? 'bg-violet-600 text-white' : 'bg-white/5 text-slate-400 hover:text-white'}`}>
+                className={`text-[11px] px-2 py-0.5 rounded ${riskPct === p ? 'bg-violet-600 text-white' : 'bg-white/[0.04] border border-line text-slate-400 hover:text-white'}`}>
                 {p}%
               </button>
             ))}
@@ -173,31 +173,31 @@ function SwingTrade({ accountTotal }: { accountTotal?: number }) {
       )}
 
       <div className="grid grid-cols-3 gap-3">
-        <div className="bg-violet-600/10 border border-violet-500/30 rounded-xl p-3">
+        <div className="bg-violet-500/[0.07] border border-violet-500/20 rounded-xl p-3 min-w-0">
           <p className="text-xs text-slate-500">Shares</p>
-          <CopyNumber value={shares} className="block text-2xl font-bold text-white" />
+          <CopyNumber value={shares} className="block text-lg sm:text-2xl font-semibold tracking-tight text-white" />
           {riskPerShare > 0 && <p className="text-[11px] text-slate-500">${riskPerShare.toFixed(2)} risk/share</p>}
         </div>
-        <div className="bg-violet-600/10 border border-violet-500/30 rounded-xl p-3">
-          <p className="text-xs text-slate-500">Position size</p>
-          <p className="text-2xl font-bold text-white">${positionSize.toFixed(0)}</p>
+        <div className="bg-violet-500/[0.07] border border-violet-500/20 rounded-xl p-3 min-w-0">
+          <p className="text-xs text-slate-500 truncate">Position size</p>
+          <p className="text-lg sm:text-2xl font-semibold tracking-tight text-white">{usd(positionSize)}</p>
           {capital > 0 && shares > 0 && <p className="text-[11px] text-slate-500">{((positionSize / capital) * 100).toFixed(1)}% of capital</p>}
         </div>
-        <div className="bg-red-600/10 border border-red-500/30 rounded-xl p-3">
+        <div className="bg-red-500/[0.07] border border-red-500/20 rounded-xl p-3 min-w-0">
           <p className="text-xs text-slate-500">Max risk</p>
-          <p className="text-2xl font-bold text-red-400">-${maxRisk.toFixed(2)}</p>
+          <p className="text-lg sm:text-2xl font-semibold tracking-tight text-red-400">-{usd(maxRisk)}</p>
         </div>
       </div>
 
       {shares > 0 && (
         <div>
-          <h3 className="text-xs text-slate-500 uppercase tracking-wider mb-3">Profit targets</h3>
+          <h3 className="label-caps mb-3">Profit targets</h3>
           <div className="space-y-2">
             {targets.map(t => (
-              <div key={t.r} className="flex justify-between items-center py-2 border-b border-white/5 text-sm">
+              <div key={t.r} className="flex justify-between items-center py-2 border-b border-line text-sm">
                 <span className="text-slate-400 w-10">{t.r}R</span>
-                <span className="text-white font-medium">${t.price.toFixed(2)}</span>
-                <span className="text-emerald-400 font-medium">+${t.profit.toFixed(2)}</span>
+                <span className="text-white font-medium">{usd(t.price)}</span>
+                <span className="text-emerald-400 font-medium">{signedUsd(t.profit)}</span>
                 <span className="text-slate-500 text-xs">+{((t.profit / positionSize) * 100).toFixed(1)}%</span>
               </div>
             ))}
@@ -218,8 +218,8 @@ export default function Calculator() {
   return (
     <div>
       <div className="flex items-center justify-between gap-3 flex-wrap mb-6">
-        <h1 className="text-xl font-semibold text-white">Calculator</h1>
-        <div className="flex gap-1 bg-white/5 rounded-lg p-1">
+        <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white">Calculator</h1>
+        <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5">
           {TABS.map(t => (
             <button key={t.id} onClick={() => setTab(t.id)}
               className={`px-3 py-1 rounded-md text-sm transition-colors ${tab === t.id ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -230,7 +230,7 @@ export default function Calculator() {
       </div>
 
       <div className="max-w-2xl">
-        <div className="bg-white/5 rounded-xl border border-white/10 p-4 sm:p-6">
+        <div className="card p-4 sm:p-6">
           {tab === 'scalein' ? <ScaleIn accountTotal={account?.total_assets} /> : <SwingTrade accountTotal={account?.total_assets} />}
         </div>
       </div>

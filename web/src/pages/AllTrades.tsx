@@ -64,7 +64,7 @@ export default function AllTrades() {
 
   return (
     <div>
-      <h1 className="text-xl font-semibold text-white mb-4">
+      <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white mb-4">
         All Trades <span className="text-slate-500 text-sm font-normal ml-1">({filtered.length} exits)</span>
       </h1>
 
@@ -72,9 +72,9 @@ export default function AllTrades() {
         <div className="relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
           <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search ticker…"
-            className="pl-8 pr-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-slate-600 focus:outline-none focus:border-violet-500 w-40" />
+            className="pl-8 pr-3 py-1.5 field text-sm text-white w-40" />
         </div>
-        <div className="flex gap-1 bg-white/5 rounded-lg p-1 flex-wrap">
+        <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5 flex-wrap">
           {(['all', 'win', 'loss', 'long', 'short', 'with R'] as Filter[]).map(f => (
             <button key={f} onClick={() => setFilter(f)}
               className={`px-2.5 py-1 rounded-md text-xs transition-colors capitalize ${filter === f ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -84,7 +84,7 @@ export default function AllTrades() {
         </div>
         {allTags.length > 0 && (
           <select value={tag} onChange={e => setTag(e.target.value)}
-            className="bg-white/5 border border-white/10 rounded-lg text-xs text-slate-300 px-2 py-1.5 focus:outline-none focus:border-violet-500">
+            className="field text-xs text-slate-300 px-2 py-1.5">
             <option value="">All tags</option>
             {allTags.map(t => <option key={t} value={t}>{t}</option>)}
           </select>
@@ -96,11 +96,11 @@ export default function AllTrades() {
         </div>
       </div>
 
-      <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
+      <div className="card overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
-              <tr className="text-xs text-slate-500 border-b border-white/10">
+              <tr className="label-caps border-b border-line bg-white/[0.02]">
                 <th className="text-left px-4 py-2">Ticker</th>
                 <th className="text-left px-4 py-2 hidden sm:table-cell">Type</th>
                 <th className="text-right px-4 py-2 hidden md:table-cell">Entry</th>
@@ -115,7 +115,7 @@ export default function AllTrades() {
             <tbody>
               {filtered.map(t => (
                 <tr key={t.trade_id} onClick={() => setSelectedId(t.trade_id)}
-                  className="border-b border-white/5 hover:bg-white/5 transition-colors cursor-pointer">
+                  className="border-b border-line hover:bg-white/[0.03] transition-colors cursor-pointer">
                   <td className="px-4 py-2.5 max-w-[140px]">
                     <span className="block truncate font-medium text-white" title={t.ticker}>{t.ticker}</span>
                     <span className="block text-[11px] text-slate-600">{t.exit_date}{t.position_status === 'open' ? ' · partial' : ''}</span>
@@ -153,8 +153,8 @@ export default function AllTrades() {
 
       {selected && (
         <div className="fixed inset-0 z-50 flex justify-end">
-          <div className="absolute inset-0 bg-black/40" onClick={() => setSelectedId(null)} />
-          <div className="relative w-full sm:max-w-xl bg-[#13151f] sm:border-l border-white/10 h-full overflow-y-auto p-5 pt-[calc(1.25rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={() => setSelectedId(null)} />
+          <div className="relative w-full sm:max-w-xl bg-surface sm:border-l border-line h-full overflow-y-auto p-5 pt-[calc(1.25rem+env(safe-area-inset-top))] pb-[calc(1.5rem+env(safe-area-inset-bottom))]">
             <button onClick={() => setSelectedId(null)} className="absolute top-[calc(1rem+env(safe-area-inset-top))] right-4 text-slate-400 hover:text-white" aria-label="Close">
               <X size={18} />
             </button>

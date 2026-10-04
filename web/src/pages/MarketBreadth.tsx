@@ -42,8 +42,8 @@ export default function MarketBreadth() {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-xl font-semibold text-white">Market Breadth</h1>
-        <div className="flex gap-1 bg-white/5 rounded-lg p-1">
+        <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white">Market Breadth</h1>
+        <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5">
           {PERIODS.map(p => (
             <button key={p} onClick={() => setPeriod(p)}
               className={`px-2.5 py-1 rounded-md text-xs transition-colors ${period === p ? 'bg-white/15 text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -55,7 +55,7 @@ export default function MarketBreadth() {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-6">
         {/* VIX card */}
-        <div className="bg-white/5 rounded-xl border border-white/10 p-5">
+        <div className="card p-5">
           <p className="text-xs text-slate-500 mb-1">VIX (Fear Index)</p>
           <div className="flex items-end gap-3">
             <span className={`text-4xl font-bold ${vix.color}`}>{data.vix.toFixed(2)}</span>
@@ -67,7 +67,7 @@ export default function MarketBreadth() {
         </div>
 
         {/* Sector breadth */}
-        <div className="bg-white/5 rounded-xl border border-white/10 p-5 lg:col-span-2">
+        <div className="card p-5 lg:col-span-2">
           <p className="text-xs text-slate-500 mb-1">Sectors Advancing</p>
           <div className="flex items-end gap-3 mb-3">
             <span className="text-3xl font-bold text-white">{data.sectors_positive}</span>
@@ -89,7 +89,7 @@ export default function MarketBreadth() {
       {/* Indices grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         {data.indices.map(idx => (
-          <div key={idx.ticker} className="bg-white/5 rounded-xl border border-white/10 p-4">
+          <div key={idx.ticker} className="card p-4">
             <p className="text-xs text-slate-500">{idx.name}</p>
             <p className="text-lg font-semibold text-white mt-1">${idx.price.toFixed(2)}</p>
             <p className={`text-sm font-medium mt-0.5 ${idx.change_pct >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>

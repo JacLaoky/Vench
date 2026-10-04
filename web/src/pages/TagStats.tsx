@@ -16,8 +16,8 @@ export default function TagStats() {
   return (
     <div>
       <div className="flex items-center justify-between gap-3 flex-wrap mb-2">
-        <h1 className="text-xl font-semibold text-white">Tags{loading && data && <span className="text-xs text-slate-500 font-normal ml-2">updating…</span>}</h1>
-        <div className="flex gap-1 bg-white/5 rounded-lg p-1">
+        <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white">Tags{loading && data && <span className="text-xs text-slate-500 font-normal ml-2">updating…</span>}</h1>
+        <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5">
           {TIMEFRAMES.map(t => (
             <button key={t} onClick={() => setTf(t)}
               className={`px-2.5 py-1 rounded-md text-xs transition-colors ${tf === t ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -33,7 +33,7 @@ export default function TagStats() {
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
           {data.map(t => (
-            <div key={t.tag} className="bg-white/5 rounded-xl border border-white/10 p-4">
+            <div key={t.tag} className="card p-4">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-sm font-medium px-2.5 py-0.5 rounded-full" style={tagColor(t.tag)}>{t.tag}</span>
                 <span className={`text-base font-semibold ${pnlColor(t.total_pnl)}`}>{signedUsd(t.total_pnl)}</span>

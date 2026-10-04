@@ -61,7 +61,7 @@ export default function TagEditor({ tradeId, tags, onChange }: {
         <input value={input} onChange={e => setInput(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); add(input) } }}
           placeholder="+ tag"
-          className="w-24 bg-transparent border-b border-white/10 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-violet-500 py-0.5" />
+          className="w-24 bg-transparent border-b border-line text-xs text-white placeholder-slate-600 focus:outline-none focus:border-violet-500 py-0.5" />
       </div>
       {suggestions.length > 0 && (
         <div className="flex gap-1 flex-wrap mt-2">

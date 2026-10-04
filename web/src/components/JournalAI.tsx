@@ -139,10 +139,10 @@ export default function JournalAI() {
     <div className="fixed bottom-[calc(1rem+env(safe-area-inset-bottom))] right-4 sm:bottom-6 sm:right-6 z-50 flex flex-col items-end gap-2">
 
       {open && (
-        <div className="w-[calc(100vw-2rem)] sm:w-[380px] max-h-[70vh] sm:max-h-[560px] bg-[#12141e] border border-white/10 rounded-2xl shadow-2xl flex flex-col overflow-hidden">
+        <div className="w-[calc(100vw-2rem)] sm:w-[380px] max-h-[70vh] sm:max-h-[560px] bg-surface border border-line-strong rounded-2xl shadow-2xl flex flex-col overflow-hidden">
 
           {/* Header */}
-          <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-[#1a1d2e]">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-line bg-surface-2">
             <div className="flex items-center gap-2">
               <Bot size={16} className="text-violet-400" />
               <span className="text-sm font-medium text-white">Journal AI</span>
@@ -219,7 +219,7 @@ export default function JournalAI() {
           </div>
 
           {/* Input */}
-          <div className="p-3 border-t border-white/10">
+          <div className="p-3 border-t border-line">
             <div className="flex gap-2 items-end">
               <textarea
                 value={input}
@@ -229,7 +229,7 @@ export default function JournalAI() {
                 }}
                 placeholder="问问你的交易日志..."
                 rows={1}
-                className="flex-1 bg-white/5 border border-white/10 rounded-lg px-3 py-2 text-xs text-white placeholder-slate-600 resize-none focus:outline-none focus:border-violet-500/50 transition-colors"
+                className="flex-1 field px-3 py-2 text-xs text-white resize-none transition-colors"
               />
               <button
                 onClick={() => send(input)}
@@ -246,7 +246,7 @@ export default function JournalAI() {
       {/* Toggle button */}
       <button
         onClick={() => setOpen(o => !o)}
-        className="flex items-center gap-2 bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium px-4 py-2.5 rounded-full shadow-lg shadow-violet-900/40 transition-all hover:scale-105 active:scale-95"
+        className="flex items-center gap-2 bg-violet-600 hover:bg-violet-500 text-white shadow-sm shadow-violet-950/50 text-sm font-medium px-4 py-2.5 rounded-full shadow-lg shadow-violet-900/40 transition-all hover:scale-105 active:scale-95"
       >
         {open ? <ChevronDown size={16} /> : <Bot size={16} />}
         {!open && 'Journal AI'}

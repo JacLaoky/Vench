@@ -1,17 +1,139 @@
 @import "tailwindcss";
 
+/* ── Design tokens ─────────────────────────────────────────────────────────────
+   One palette for the whole app. Overriding Tailwind's violet / emerald / red / slate keeps
+   every existing utility (bg-violet-600, text-emerald-400, text-slate-500 …) on-palette. */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+
+  --color-canvas: #090b10;
+  --color-surface: #10131a;
+  --color-surface-2: #151923;
+  --color-surface-3: #1b2030;
+  --color-line: rgb(255 255 255 / 0.07);
+  --color-line-strong: rgb(255 255 255 / 0.12);
+
+  /* accent: a calmer indigo-violet */
+  --color-violet-300: #c4bdfd;
+  --color-violet-400: #a79bfb;
+  --color-violet-500: #8b7cf6;
+  --color-violet-600: #6f5ff0;
+
+  /* gains / losses: slightly softened so dense tables stay readable */
+  --color-emerald-300: #7ee2b8;
+  --color-emerald-400: #3fd49a;
+  --color-emerald-500: #22b981;
+  --color-red-300: #fda4a4;
+  --color-red-400: #f47a7a;
+  --color-red-500: #e85d5d;
+
+  /* neutral text greys with a hint of blue */
+  --color-slate-200: #e3e6ee;
+  --color-slate-300: #c3c8d4;
+  --color-slate-400: #959cad;
+  --color-slate-500: #6d7486;
+  --color-slate-600: #4b5162;
+
+  --shadow-card: 0 1px 0 0 rgb(255 255 255 / 0.03) inset, 0 8px 24px -12px rgb(0 0 0 / 0.6);
+}
+
+/* ── Shared building blocks ─────────────────────────────────────────────────── */
+@utility card {
+  background: linear-gradient(180deg, var(--color-surface-2), var(--color-surface));
+  border: 1px solid var(--color-line);
+  border-radius: 0.875rem;
+  box-shadow: var(--shadow-card);
+}
+
+@utility card-hover {
+  transition: border-color 150ms, transform 150ms, background 150ms;
+  &:hover {
+    border-color: var(--color-line-strong);
+    background: linear-gradient(180deg, var(--color-surface-3), var(--color-surface-2));
+  }
+}
+
+@utility field {
+  background: rgb(255 255 255 / 0.03);
+  border: 1px solid var(--color-line-strong);
+  border-radius: 0.5rem;
+  color: var(--color-slate-200);
+  transition: border-color 150ms, box-shadow 150ms;
+  &:focus {
+    outline: none;
+    border-color: var(--color-violet-500);
+    box-shadow: 0 0 0 3px rgb(139 124 246 / 0.18);
+  }
+  &::placeholder {
+    color: var(--color-slate-600);
+  }
+}
+
+@utility label-caps {
+  font-size: 0.6875rem;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-slate-500);
+}
+
+/* ── Base ───────────────────────────────────────────────────────────────────── */
 * {
   box-sizing: border-box;
 }
 
+html {
+  color-scheme: dark;
+}
+
 body {
   margin: 0;
-  background: #0f1117;
-  color: #e2e8f0;
-  font-family: system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+  background:
+    radial-gradient(1200px 600px at 10% -10%, rgb(111 95 240 / 0.08), transparent 60%),
+    radial-gradient(900px 500px at 110% 0%, rgb(34 185 129 / 0.04), transparent 60%),
+    var(--color-canvas);
+  background-attachment: fixed;
+  color: var(--color-slate-200);
+  font-family: var(--font-sans);
+  /* equal-width digits so every number column lines up */
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "cv11", "ss01";
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 #root {
   min-height: 100vh;
+}
+
+::selection {
+  background: rgb(139 124 246 / 0.35);
+}
+
+:focus-visible {
+  outline: 2px solid rgb(139 124 246 / 0.7);
+  outline-offset: 2px;
+}
+
+/* slim scrollbars in tables / panels */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.12) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 0.12);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* charts: no focus outline on the svg after a click */
+.recharts-wrapper *:focus {
+  outline: none;
 }

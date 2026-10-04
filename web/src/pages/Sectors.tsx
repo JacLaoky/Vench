@@ -37,9 +37,9 @@ export default function Sectors() {
   return (
     <div>
       <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
-        <h1 className="text-xl font-semibold text-white">Market{loading && data && <span className="text-xs text-slate-500 font-normal ml-2">updating…</span>}</h1>
+        <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white">Market{loading && data && <span className="text-xs text-slate-500 font-normal ml-2">updating…</span>}</h1>
         <div className="flex gap-2">
-          <div className="flex gap-1 bg-white/5 rounded-lg p-1">
+          <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5">
             {PERIODS.map(p => (
               <button key={p} onClick={() => setPeriod(p)}
                 className={`px-2.5 py-1 rounded-md text-xs transition-colors ${period === p ? 'bg-white/15 text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -47,7 +47,7 @@ export default function Sectors() {
               </button>
             ))}
           </div>
-          <div className="flex gap-1 bg-white/5 rounded-lg p-1">
+          <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5">
             {(['sectors', 'themes'] as const).map(t => (
               <button key={t} onClick={() => setTab(t)}
                 className={`px-3 py-1 rounded-md text-sm transition-colors capitalize ${tab === t ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -70,7 +70,7 @@ export default function Sectors() {
             <span className="text-red-400 font-medium">{worst?.name}</span>
             <span className="text-red-400">{worst?.change_pct.toFixed(2)}%</span>
           </div>
-          <div className="flex items-center gap-1.5 bg-white/5 border border-white/10 rounded-lg px-3 py-1.5">
+          <div className="flex items-center gap-1.5 field px-3 py-1.5">
             <span className="text-slate-500">Avg</span>
             <span className={avg >= 0 ? 'text-emerald-400' : 'text-red-400'}>{avg >= 0 ? '+' : ''}{avg.toFixed(2)}%</span>
           </div>

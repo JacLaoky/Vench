@@ -4,7 +4,7 @@ import { ErrorState, Loading } from '../components/PageState'
 import { X } from 'lucide-react'
 import { api } from '../api'
 import { useApi } from '../lib/useApi'
-import { fmtR, rColor } from '../lib/format'
+import { fmtR, rColor, signedUsd, usd } from '../lib/format'
 import type { DeepStats, RStats } from '../types'
 import {
   ComposedChart, Area, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
@@ -31,10 +31,10 @@ const TIMEFRAMES = ['1W', '1M', '3M', '1Y', 'YTD', 'AT'] as const
 
 function MetricCard({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
   return (
-    <div className="bg-white/5 rounded-xl p-4 border border-white/10">
-      <p className="text-xs text-slate-500 mb-1">{label}</p>
-      <p className={`text-lg font-semibold ${color ?? 'text-white'}`}>{value}</p>
-      {sub && <p className="text-xs text-slate-500 mt-0.5">{sub}</p>}
+    <div className="card p-4">
+      <p className="label-caps mb-2">{label}</p>
+      <p className={`text-xl font-semibold tracking-tight ${color ?? 'text-white'}`}>{value}</p>
+      {sub && <p className="text-xs text-slate-500 mt-1">{sub}</p>}
     </div>
   )
 }
@@ -42,11 +42,11 @@ function MetricCard({ label, value, sub, color }: { label: string; value: string
 const Tip = ({ active, payload, label }: any) => {
   if (!active || !payload?.length) return null
   return (
-    <div className="bg-[#1a1d27] border border-white/10 rounded-lg px-3 py-2 text-xs">
+    <div className="bg-surface-3 border border-line-strong rounded-lg px-3 py-2 text-xs">
       <p className="text-slate-400 mb-1">{label}</p>
       {payload.map((p: any) => (
-        <p key={p.name} style={{ color: p.color ?? '#a78bfa' }}>
-          {p.name}: {typeof p.value === 'number' ? `$${p.value.toFixed(2)}` : p.value}
+        <p key={p.name} style={{ color: p.color ?? '#a79bfb' }}>
+          {p.name}: {typeof p.value === 'number' ? signedUsd(p.value) : p.value}
         </p>
       ))}
     </div>
@@ -79,12 +79,12 @@ function SymbolPanel({
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
       {/* backdrop */}
-      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
 
       {/* panel */}
-      <div className="relative w-full max-w-md bg-[#13151f] border-l border-white/10 h-full flex flex-col shadow-2xl animate-in slide-in-from-right duration-200">
+      <div className="relative w-full max-w-md bg-surface border-l border-line h-full flex flex-col shadow-2xl animate-in slide-in-from-right duration-200">
         {/* header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-line">
           <div>
             <h2 className="text-lg font-semibold text-white">{symbol.symbol}</h2>
             <p className="text-xs text-slate-500">{symbol.trades.all} trades</p>
@@ -95,13 +95,13 @@ function SymbolPanel({
         </div>
 
         {/* summary strip */}
-        <div className="grid grid-cols-3 gap-px bg-white/10 border-b border-white/10">
+        <div className="grid grid-cols-3 gap-px bg-line border-b border-line">
           {[
-            { label: 'Total P&L', value: `${symbol.isProfit ? '+' : ''}$${symbol.pnl_raw.toFixed(2)}`, color: symbol.isProfit ? 'text-emerald-400' : 'text-red-400' },
+            { label: 'Total P&L', value: signedUsd(symbol.pnl_raw), color: symbol.isProfit ? 'text-emerald-400' : 'text-red-400' },
             { label: 'Win Rate', value: `${winRate}%`, color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
             { label: 'W / L', value: `${wins} / ${trades.length - wins}`, color: 'text-white' },
           ].map(item => (
-            <div key={item.label} className="bg-[#13151f] px-4 py-3 text-center">
+            <div key={item.label} className="bg-surface px-4 py-3 text-center">
               <p className="text-xs text-slate-500 mb-0.5">{item.label}</p>
               <p className={`text-sm font-semibold ${item.color}`}>{item.value}</p>
             </div>
@@ -112,7 +112,7 @@ function SymbolPanel({
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
           {trades.length === 0 && <p className="text-slate-500 text-sm">No trades found</p>}
           {trades.map(t => (
-            <div key={t.trade_id} className="bg-white/5 rounded-xl border border-white/10 p-4">
+            <div key={t.trade_id} className="card p-4">
               <div className="flex justify-between items-start mb-2">
                 <span className={`text-xs px-1.5 py-0.5 rounded ${t.trade_type === 'LONG' ? 'bg-emerald-600/20 text-emerald-400' : 'bg-red-600/20 text-red-400'}`}>
                   {t.trade_type}
@@ -170,10 +170,10 @@ function SymbolRanking({
   const maxAbs = Math.max(...list.map(s => Math.abs(s.pnl_raw)), 1)
 
   return (
-    <div className="bg-white/5 rounded-xl border border-white/10 p-4">
+    <div className="card p-4">
       <div className="flex items-center justify-between mb-3">
         <h2 className="text-sm font-medium text-white">Top Symbols</h2>
-        <div className="flex gap-1 bg-white/5 rounded-lg p-0.5">
+        <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5">
           <button onClick={() => setMode('winners')}
             className={`px-2.5 py-1 rounded-md text-xs transition-colors ${mode === 'winners' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'}`}>
             Winners
@@ -220,7 +220,7 @@ function RSection({ r }: { r: RStats }) {
     : null
   if (!r || r.count === 0) {
     return (
-      <div className="bg-white/5 rounded-xl border border-white/10 p-4 mb-6">
+      <div className="card p-4 mb-6">
         <h2 className="text-sm font-medium text-white mb-1">R Multiples</h2>
         <p className="text-xs text-slate-500">No R-ledger trades closed in this period.</p>
         {ledgerNote}
@@ -228,7 +228,7 @@ function RSection({ r }: { r: RStats }) {
     )
   }
   return (
-    <div className="bg-white/5 rounded-xl border border-white/10 p-4 mb-6">
+    <div className="card p-4 mb-6">
       <div className="flex flex-col sm:flex-row sm:items-baseline sm:justify-between gap-1 mb-4">
         <h2 className="text-sm font-medium text-white whitespace-nowrap">R Multiples</h2>
         <span className="text-xs text-slate-500">
@@ -244,12 +244,12 @@ function RSection({ r }: { r: RStats }) {
       </div>
       <ResponsiveContainer width="100%" height={160}>
         <BarChart data={r.distribution}>
-          <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-          <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} width={24} />
+          <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} />
+          <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} width={24} />
           <Tooltip cursor={{ fill: 'rgba(255,255,255,0.04)' }}
-            contentStyle={{ background: '#1a1d27', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, fontSize: 12 }} />
+            contentStyle={{ background: '#1b2030', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, fontSize: 12 }} />
           <Bar dataKey="count" name="Positions" radius={[4, 4, 0, 0]}>
-            {r.distribution.map((d, i) => <Cell key={i} fill={d.label.startsWith('-') || d.label.startsWith('≤') ? '#f87171' : '#34d399'} />)}
+            {r.distribution.map((d, i) => <Cell key={i} fill={d.label.startsWith('-') || d.label.startsWith('≤') ? '#f47a7a' : '#3fd49a'} />)}
           </Bar>
         </BarChart>
       </ResponsiveContainer>
@@ -267,13 +267,13 @@ function BreakdownTables({ deep }: { deep: DeepStats }) {
     ['Avg P&L', deep.gain_loss.avg_usd],
   ]
   return (
-    <div className="bg-white/5 rounded-xl border border-white/10 p-4 mb-4">
+    <div className="card p-4 mb-4">
       <h2 className="text-sm font-medium text-white mb-3">Breakdown <span className="text-xs text-slate-500 font-normal ml-1">per closed position</span></h2>
       <table className="w-full text-sm">
-        <thead><tr className="text-[11px] text-slate-500"><th /><th className="text-right font-normal">All</th><th className="text-right font-normal">Won</th><th className="text-right font-normal">Lost</th></tr></thead>
+        <thead><tr className="label-caps"><th /><th className="text-right font-normal">All</th><th className="text-right font-normal">Won</th><th className="text-right font-normal">Lost</th></tr></thead>
         <tbody>
           {rows.map(([label, v]) => (
-            <tr key={label} className="border-b border-white/5 last:border-0">
+            <tr key={label} className="border-b border-line last:border-0">
               <td className="py-1.5 text-slate-400">{label}</td>
               <td className="py-1.5 text-right text-white">{v.all}</td>
               <td className="py-1.5 text-right text-emerald-400">{v.won}</td>
@@ -307,8 +307,8 @@ export default function Performance() {
   return (
     <div>
       <div className="flex items-center justify-between gap-3 flex-wrap mb-6">
-        <h1 className="text-xl font-semibold text-white">Performance{loading && <span className="text-xs text-slate-500 font-normal ml-2">updating…</span>}</h1>
-        <div className="flex gap-1 bg-white/5 rounded-lg p-1">
+        <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white">Performance{loading && <span className="text-xs text-slate-500 font-normal ml-2">updating…</span>}</h1>
+        <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5">
           {TIMEFRAMES.map(t => (
             <button key={t} onClick={() => setTf(t)}
               className={`px-2.5 py-1 rounded-md text-xs transition-colors ${tf === t ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -320,16 +320,16 @@ export default function Performance() {
 
       {/* KPI grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        <MetricCard label="Total P&L" value={`${s.total_pnl >= 0 ? '+' : ''}$${s.total_pnl.toFixed(2)}`} color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'} />
+        <MetricCard label="Total P&L" value={signedUsd(s.total_pnl)} color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'} />
         <MetricCard label="Win Rate" value={s.win_rate} color={winPct >= 50 ? 'text-emerald-400' : 'text-red-400'} sub={`${data.deep_stats.gain_loss.trades.won}W / ${data.deep_stats.gain_loss.trades.lost}L`} />
         <MetricCard label="Profit Factor" value={String(s.profit_factor)} color={s.profit_factor >= 1 ? 'text-emerald-400' : 'text-red-400'} />
-        <MetricCard label="Expectancy" value={`$${s.expectancy.toFixed(2)}`} color={s.expectancy >= 0 ? 'text-emerald-400' : 'text-red-400'} />
+        <MetricCard label="Expectancy" value={signedUsd(s.expectancy)} color={s.expectancy >= 0 ? 'text-emerald-400' : 'text-red-400'} />
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        <MetricCard label="Avg Win" value={`$${s.avg_win.toFixed(2)}`} color="text-emerald-400" sub={data.deep_stats.best_worst.largest_usd.won} />
-        <MetricCard label="Avg Loss" value={`-$${s.avg_loss.toFixed(2)}`} color="text-red-400" sub={data.deep_stats.best_worst.largest_usd.lost} />
-        <MetricCard label="Max Drawdown" value={`$${Math.abs(s.max_drawdown).toFixed(2)}`} color="text-red-400" />
+        <MetricCard label="Avg Win" value={usd(s.avg_win)} color="text-emerald-400" sub={data.deep_stats.best_worst.largest_usd.won} />
+        <MetricCard label="Avg Loss" value={`-${usd(s.avg_loss)}`} color="text-red-400" sub={data.deep_stats.best_worst.largest_usd.lost} />
+        <MetricCard label="Max Drawdown" value={`-${usd(s.max_drawdown)}`} color="text-red-400" />
         <MetricCard label="Kelly %" value={`${s.kelly_pct.toFixed(1)}%`} />
       </div>
 
@@ -351,8 +351,8 @@ export default function Performance() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
         {/* Drawdown curve */}
         {data.drawdown_curve?.length > 0 && (
-          <div className="bg-white/5 rounded-xl border border-white/10 p-4">
-            <h2 className="text-sm font-medium text-white mb-4">
+          <div className="card p-4">
+            <h2 className="text-sm font-semibold text-slate-100 mb-4">
               Equity <span className="text-violet-400">—</span> &amp; Drawdown <span className="text-red-400">▆</span>
               <span className="text-xs text-slate-500 font-normal ml-2">cumulative realized P&L per day</span>
             </h2>
@@ -360,16 +360,16 @@ export default function Performance() {
               <ComposedChart data={data.drawdown_curve}>
                 <defs>
                   <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#f87171" stopOpacity={0.3} />
-                    <stop offset="95%" stopColor="#f87171" stopOpacity={0} />
+                    <stop offset="5%" stopColor="#f47a7a" stopOpacity={0.3} />
+                    <stop offset="95%" stopColor="#f47a7a" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} />
                 <Tooltip content={<Tip />} />
-                <ReferenceLine y={0} stroke="#374151" />
-                <Area type="monotone" dataKey="drawdown" stroke="#f87171" fill="url(#ddGrad)" strokeWidth={1.5} name="Drawdown" dot={false} />
-                <Line type="monotone" dataKey="equity" stroke="#a78bfa" strokeWidth={2} name="Equity" dot={false} />
+                <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
+                <Area type="monotone" dataKey="drawdown" stroke="#f47a7a" fill="url(#ddGrad)" strokeWidth={1.5} name="Drawdown" dot={false} />
+                <Line type="monotone" dataKey="equity" stroke="#a79bfb" strokeWidth={2} name="Equity" dot={false} />
               </ComposedChart>
             </ResponsiveContainer>
           </div>
@@ -377,16 +377,16 @@ export default function Performance() {
 
         {/* Monthly bars */}
         {data.monthly_bars?.length > 0 && (
-          <div className="bg-white/5 rounded-xl border border-white/10 p-4">
-            <h2 className="text-sm font-medium text-white mb-4">Monthly P&L</h2>
+          <div className="card p-4">
+            <h2 className="text-sm font-semibold text-slate-100 mb-4">Monthly P&L</h2>
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={data.monthly_bars}>
-                <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} />
                 <Tooltip content={<Tip />} />
-                <ReferenceLine y={0} stroke="#374151" />
+                <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
                 <Bar dataKey="value" radius={[4, 4, 0, 0]} name="P&L">
-                  {data.monthly_bars.map((e, i) => <Cell key={i} fill={e.isProfit ? '#34d399' : '#f87171'} />)}
+                  {data.monthly_bars.map((e, i) => <Cell key={i} fill={e.isProfit ? '#3fd49a' : '#f47a7a'} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -397,20 +397,20 @@ export default function Performance() {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
         {/* DOW stats */}
         {data.dow_stats?.length > 0 && (
-          <div className="bg-white/5 rounded-xl border border-white/10 p-4">
-            <h2 className="text-sm font-medium text-white mb-4">Day of Week</h2>
+          <div className="card p-4">
+            <h2 className="text-sm font-semibold text-slate-100 mb-4">Day of Week</h2>
             <ResponsiveContainer width="100%" height={160}>
               <BarChart data={data.dow_stats}>
-                <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#6d7486' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: '#6d7486' }} axisLine={false} tickLine={false} />
                 <Tooltip content={<Tip />} />
-                <ReferenceLine y={0} stroke="#374151" />
+                <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
                 <Bar dataKey="pnl" radius={[4, 4, 0, 0]} name="P&L">
-                  {data.dow_stats.map((e, i) => <Cell key={i} fill={e.isProfit ? '#34d399' : '#f87171'} />)}
+                  {data.dow_stats.map((e, i) => <Cell key={i} fill={e.isProfit ? '#3fd49a' : '#f47a7a'} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
-            <div className="grid grid-cols-5 text-center text-[11px] mt-2 border-t border-white/5 pt-2">
+            <div className="grid grid-cols-5 text-center text-[11px] mt-2 border-t border-line pt-2">
               {data.dow_stats.map(d => (
                 <div key={d.label}>
                   <p className="text-slate-300">{d.trades} closed</p>

@@ -38,9 +38,9 @@ export default function StopEditor({ positionId, ticker, stop, onSaved }: Props)
     <div className="flex items-center gap-2 flex-wrap">
       <label className="text-xs text-slate-500">Current stop</label>
       <input type="number" inputMode="decimal" step="0.01" value={value} onChange={e => setValue(e.target.value)}
-        className="w-24 bg-white/5 border border-white/10 rounded-lg px-2 py-1 text-sm text-white focus:outline-none focus:border-violet-500" />
+        className="w-24 field px-2 py-1 text-sm text-white" />
       <button onClick={save} disabled={saving}
-        className="px-3 py-1 bg-violet-600 hover:bg-violet-500 text-white text-xs rounded-lg disabled:opacity-50">
+        className="px-3 py-1 bg-violet-600 hover:bg-violet-500 text-white shadow-sm shadow-violet-950/50 text-xs rounded-lg disabled:opacity-50">
         {saving ? 'Saving…' : 'Save'}
       </button>
       {msg && <span className={`text-xs ${msg === 'Saved' ? 'text-emerald-400' : 'text-red-400'}`}>{msg}</span>}

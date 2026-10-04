@@ -9,9 +9,9 @@ import type { Position } from '../types'
 
 function StatCard({ label, value, positive }: { label: string; value: string; positive?: boolean }) {
   return (
-    <div className="bg-white/5 rounded-xl p-4 border border-white/10">
-      <p className="text-xs text-slate-500 mb-1">{label}</p>
-      <p className={`text-lg sm:text-xl font-semibold ${positive === undefined ? 'text-white' : positive ? 'text-emerald-400' : 'text-red-400'}`}>
+    <div className="card p-4">
+      <p className="label-caps mb-2">{label}</p>
+      <p className={`text-xl sm:text-2xl font-semibold tracking-tight ${positive === undefined ? 'text-white' : positive ? 'text-emerald-400' : 'text-red-400'}`}>
         {value}
       </p>
     </div>
@@ -45,7 +45,7 @@ export default function Dashboard() {
 
   return (
     <div>
-      <h1 className="text-xl font-semibold text-white mb-6">Dashboard</h1>
+      <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white mb-6">Dashboard</h1>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-8">
         <StatCard label="Total Assets" value={account.total_assets !== undefined ? usd(account.total_assets) : '—'} />
@@ -54,8 +54,8 @@ export default function Dashboard() {
         <StatCard label="Today's P&L" value={signedUsd(todayPnl)} positive={todayPnl >= 0} />
       </div>
 
-      <div className="bg-white/5 rounded-xl border border-white/10 overflow-hidden">
-        <div className="px-4 py-3 border-b border-white/10">
+      <div className="card overflow-hidden">
+        <div className="px-4 py-3 border-b border-line">
           <h2 className="text-sm font-medium text-white">Open Positions ({positions.length})</h2>
         </div>
         {positions.length === 0 ? (
@@ -64,7 +64,7 @@ export default function Dashboard() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="text-xs text-slate-500 border-b border-white/10">
+                <tr className="label-caps border-b border-line bg-white/[0.02]">
                   <th className="text-left px-4 py-2">Ticker</th>
                   <th className="text-right px-4 py-2">Qty</th>
                   <th className="text-right px-4 py-2 hidden sm:table-cell">Cost</th>
@@ -78,7 +78,7 @@ export default function Dashboard() {
               <tbody>
                 {positions.map(p => (
                   <tr key={p.ticker} onClick={() => setSelected(p)}
-                    className="border-b border-white/5 hover:bg-white/5 transition-colors cursor-pointer">
+                    className="border-b border-line hover:bg-white/[0.03] transition-colors cursor-pointer">
                     <td className="px-4 py-3">
                       <div className="font-medium text-white">{p.ticker}</div>
                       <div className="text-xs text-slate-500 truncate max-w-[120px]">{p.name}</div>

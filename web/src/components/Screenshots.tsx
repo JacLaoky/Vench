@@ -46,7 +46,7 @@ export default function Screenshots({ tradeId, images, onChange }: {
         {images.map(f => (
           <div key={f} className="relative group">
             <img src={api.imageUrl(f)} alt="" loading="lazy" onClick={() => setZoom(f)}
-              className="w-24 h-24 object-cover rounded-lg border border-white/10 cursor-zoom-in" />
+              className="w-24 h-24 object-cover rounded-lg border border-line-strong cursor-zoom-in" />
             <button onClick={() => remove(f)} aria-label="Delete screenshot"
               className="absolute top-1 right-1 p-1 rounded-md bg-black/60 text-slate-300 hover:text-red-400 sm:opacity-0 sm:group-hover:opacity-100">
               <Trash2 size={12} />

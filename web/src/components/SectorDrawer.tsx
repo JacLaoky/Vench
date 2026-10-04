@@ -45,12 +45,12 @@ export default function SectorDrawer({ ticker, name, onClose }: { ticker: string
           </div>
 
           {d.closes_50d?.length > 1 && (
-            <div className="h-28 bg-white/5 rounded-xl border border-white/10 p-2">
+            <div className="h-28 card p-2">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={d.closes_50d.map((c, i) => ({ i, c }))}>
                   <YAxis domain={['dataMin', 'dataMax']} hide />
                   <Line type="monotone" dataKey="c" dot={false} strokeWidth={2} isAnimationActive={false}
-                    stroke={d.closes_50d[d.closes_50d.length - 1] >= d.closes_50d[0] ? '#34d399' : '#f87171'} />
+                    stroke={d.closes_50d[d.closes_50d.length - 1] >= d.closes_50d[0] ? '#3fd49a' : '#f47a7a'} />
                 </LineChart>
               </ResponsiveContainer>
               <p className="text-[10px] text-slate-600 -mt-1 px-1">Last 50 sessions</p>
@@ -59,7 +59,7 @@ export default function SectorDrawer({ ticker, name, onClose }: { ticker: string
 
           <div className="grid grid-cols-2 gap-2">
             {([['MA 10', d.ma10, d.ma10_pct], ['MA 20', d.ma20, d.ma20_pct], ['MA 50', d.ma50, d.ma50_pct], ['MA 200', d.ma200, d.ma200_pct]] as const).map(([label, ma, dist]) => (
-              <div key={label} className="bg-white/5 rounded-lg border border-white/10 px-3 py-2">
+              <div key={label} className="bg-white/[0.03] rounded-lg border border-line px-3 py-2">
                 <p className="text-[11px] text-slate-500">{label}</p>
                 <p className="text-sm text-white">${ma.toFixed(2)}</p>
                 <p className={`text-[11px] ${tone(dist)}`}>price {pct(dist)}</p>

@@ -7,7 +7,7 @@ import { EmptyState, ErrorState, Loading } from './PageState'
 
 function Row({ label, all, won, lost }: { label: string; all: string; won: string; lost: string }) {
   return (
-    <tr className="border-b border-white/5 last:border-0">
+    <tr className="border-b border-line last:border-0">
       <td className="py-1.5 text-slate-400">{label}</td>
       <td className="py-1.5 text-right text-white">{all}</td>
       <td className="py-1.5 text-right text-emerald-400">{won}</td>
@@ -18,8 +18,8 @@ function Row({ label, all, won, lost }: { label: string; all: string; won: strin
 
 function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <section className="bg-white/5 rounded-xl border border-white/10 p-4">
-      <h3 className="text-xs text-slate-500 uppercase tracking-wider mb-3">{title}</h3>
+    <section className="card p-4">
+      <h3 className="label-caps mb-3">{title}</h3>
       {children}
     </section>
   )
@@ -38,7 +38,7 @@ export default function MonthDetail({ month, onClose }: { month: JournalMonth; o
         <div className="space-y-4">
           <Card title="Gain / loss (per closed position, net of fees)">
             <table className="w-full text-sm">
-              <thead><tr className="text-[11px] text-slate-500"><th /><th className="text-right font-normal">All</th><th className="text-right font-normal">Won</th><th className="text-right font-normal">Lost</th></tr></thead>
+              <thead><tr className="label-caps"><th /><th className="text-right font-normal">All</th><th className="text-right font-normal">Won</th><th className="text-right font-normal">Lost</th></tr></thead>
               <tbody>
                 <Row label="Total" {...s.gain_loss.total} />
                 <Row label="Average $" {...s.gain_loss.avg_usd} />
@@ -83,10 +83,10 @@ export default function MonthDetail({ month, onClose }: { month: JournalMonth; o
 
           <Card title="By symbol">
             <table className="w-full text-sm">
-              <thead><tr className="text-[11px] text-slate-500"><th className="text-left font-normal">Symbol</th><th className="text-right font-normal">Positions</th><th className="text-right font-normal">W / L</th><th className="text-right font-normal">P&L</th></tr></thead>
+              <thead><tr className="label-caps"><th className="text-left font-normal">Symbol</th><th className="text-right font-normal">Positions</th><th className="text-right font-normal">W / L</th><th className="text-right font-normal">P&L</th></tr></thead>
               <tbody>
                 {s.symbols_by_amount.map(sym => (
-                  <tr key={sym.symbol} className="border-b border-white/5 last:border-0">
+                  <tr key={sym.symbol} className="border-b border-line last:border-0">
                     <td className="py-1.5 text-white">{sym.symbol}</td>
                     <td className="py-1.5 text-right text-slate-400">{sym.trades.all}</td>
                     <td className="py-1.5 text-right text-slate-400">{sym.trades.won} / {sym.trades.lost}</td>

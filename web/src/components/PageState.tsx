@@ -4,9 +4,9 @@ import { AlertTriangle, Inbox, RotateCw } from 'lucide-react'
 export function Loading({ rows = 4 }: { rows?: number }) {
   return (
     <div className="space-y-3 animate-pulse" aria-label="Loading">
-      <div className="h-6 w-40 rounded bg-white/10" />
+      <div className="h-6 w-40 rounded-md bg-white/[0.06]" />
       {Array.from({ length: rows }, (_, i) => (
-        <div key={i} className="h-16 rounded-xl bg-white/5 border border-white/5" />
+        <div key={i} className="h-20 rounded-[0.875rem] bg-white/[0.03] border border-line" />
       ))}
     </div>
   )
@@ -20,7 +20,7 @@ export function ErrorState({ message, onRetry }: { message: string; onRetry?: ()
       <p className="text-xs text-slate-500 mb-4 max-w-sm break-words">{message}</p>
       {onRetry && (
         <button onClick={onRetry}
-          className="flex items-center gap-2 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white text-sm rounded-lg">
+          className="flex items-center gap-2 px-4 py-1.5 bg-violet-600 hover:bg-violet-500 text-white shadow-sm shadow-violet-950/50 text-sm rounded-lg">
           <RotateCw size={14} /> Retry
         </button>
       )}

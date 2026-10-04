@@ -50,17 +50,17 @@ export default function Recap() {
   return (
     <div>
       <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
-        <h1 className="text-xl font-semibold text-white">
+        <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white">
           {data?.year ?? ''} Recap{loading && data && <span className="text-xs text-slate-500 font-normal ml-2">updating…</span>}
         </h1>
         <div className="flex gap-2 flex-wrap">
           {data && data.years.length > 1 && (
             <select value={data.year} onChange={e => setYear(Number(e.target.value))}
-              className="bg-white/5 border border-white/10 rounded-lg text-sm text-slate-200 px-2 py-1 focus:outline-none focus:border-violet-500">
+              className="field text-sm text-slate-200 px-2 py-1">
               {data.years.map(y => <option key={y} value={y}>{y}</option>)}
             </select>
           )}
-          <div className="flex gap-1 bg-white/5 rounded-lg p-1">
+          <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5">
             {([['swing', 'Swing'], ['all', 'All trades']] as const).map(([id, label]) => (
               <button key={id} onClick={() => { setScope(id); setYear(null) }}
                 className={`px-3 py-1 rounded-md text-sm transition-colors ${scope === id ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -75,17 +75,17 @@ export default function Recap() {
         <EmptyState title="No closed positions for this year" />
       ) : (
         <>
-          <div className="bg-white/5 rounded-xl border border-white/10 overflow-x-auto">
+          <div className="card overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="bg-sky-900/60 text-sky-100 text-xs">
-                  <th className="px-3 py-2 text-left font-medium sticky left-0 bg-[#132a40] z-10">Month</th>
+                <tr className="label-caps bg-white/[0.03]">
+                  <th className="px-3 py-2 text-left font-medium sticky left-0 bg-surface-2 z-10">Month</th>
                   {columns.map(c => <th key={c.label} className={head}>{c.label}</th>)}
                 </tr>
               </thead>
               <tbody>
-                <tr className="border-b-2 border-sky-800/60 bg-white/[0.04] font-semibold">
-                  <td className="px-3 py-2 text-left text-white whitespace-nowrap sticky left-0 bg-[#1b1e29] z-10">{data.year}</td>
+                <tr className="border-b border-line-strong bg-violet-500/[0.06] font-semibold">
+                  <td className="px-3 py-2 text-left text-white whitespace-nowrap sticky left-0 bg-surface-2 z-10">{data.year}</td>
                   {columns.map(c => (
                     <td key={c.label} className={`${cell} text-slate-100`}>
                       {c.label === 'Cumulative' ? '' : c.render(data.summary)}
@@ -93,8 +93,8 @@ export default function Recap() {
                   ))}
                 </tr>
                 {data.months.map(m => (
-                  <tr key={m.month} className="border-b border-white/5 last:border-0 hover:bg-white/[0.03]">
-                    <td className="px-3 py-2 text-left text-slate-200 whitespace-nowrap sticky left-0 bg-[#16181f] z-10">{monthLabel(m.month)}</td>
+                  <tr key={m.month} className="border-b border-line last:border-0 hover:bg-white/[0.03]">
+                    <td className="px-3 py-2 text-left text-slate-200 whitespace-nowrap sticky left-0 bg-surface z-10">{monthLabel(m.month)}</td>
                     {columns.map(c => <td key={c.label} className={`${cell} text-slate-300`}>{c.render(m)}</td>)}
                   </tr>
                 ))}
