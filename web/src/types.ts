@@ -177,6 +177,8 @@ export interface RecapStats {
   return_pct?: number
   cumulative_pct?: number
   capital_start?: number
+  /** capital moved into (+) / out of (−) the swing pool */
+  flows?: number
 }
 
 export interface RecapResponse {

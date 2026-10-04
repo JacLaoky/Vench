@@ -22,6 +22,7 @@ interface Column {
 const COLUMNS: Column[] = [
   { label: 'Return', swingOnly: true, render: s => <span className={pnlColor(s.return_pct ?? 0)}>{pct(s.return_pct, true)}</span> },
   { label: 'Cumulative', swingOnly: true, render: s => s.cumulative_pct === undefined ? '' : <span className={pnlColor(s.cumulative_pct)}>{pct(s.cumulative_pct, true)}</span> },
+  { label: 'Flows', swingOnly: true, render: s => s.flows ? <span className="text-sky-300">{signedUsd(s.flows)}</span> : '—' },
   { label: 'Net P&L', render: s => <span className={pnlColor(s.net_pnl)}>{signedUsd(s.net_pnl)}</span> },
   { label: 'Avg R', swingOnly: true, render: s => <span className={rColor(s.avg_r)}>{fmtR(s.avg_r)}</span> },
   { label: 'Avg Gain %', render: s => <span className="text-emerald-400">{pct(s.avg_gain_pct)}</span> },
@@ -107,8 +108,10 @@ export default function Recap() {
                 <p>Swing = right-side trades from the trading system's R ledger (it starts in September 2026). Each position counts once, net of fees.</p>
                 {data.pool ? (
                   <p>
-                    Return = the month's realized P&L ÷ the right-side capital pool at the start of the month. Pool = {usd(data.pool.initial_base)} at
-                    set-up, adjusted by realized P&L (now {usd(data.pool.current)}). Cumulative compounds from the start of the year.
+                    Return = the month's realized P&L ÷ the right-side capital pool (Modified Dietz: money added or withdrawn mid-month
+                    counts for the part of the month it was in the pool). Pool = {usd(data.pool.initial_base)} at set-up, plus Flows, plus
+                    realized P&L (now {usd(data.pool.current)}). Cumulative chains the monthly returns from the start of the year, so
+                    Flows (recorded with /pool_add in Telegram) never count as return.
                   </p>
                 ) : (
                   <p className="text-amber-300">The capital pool hasn't been received from the trading system yet, so returns are not shown.</p>

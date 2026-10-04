@@ -274,6 +274,15 @@ def init_db():
         )
     ''')
 
+    # Capital the user moved into (+) or out of (−) the swing pool: allocation, not performance
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS swing_pool_flows (
+            date    TEXT NOT NULL,
+            amount  REAL NOT NULL,
+            note    TEXT NOT NULL DEFAULT ''
+        )
+    ''')
+
     # position_pnl is fully derived (rebuilt on every sync) — recreate it when the schema is old
     pnl_cols = {row[1] for row in conn.execute('PRAGMA table_info(position_pnl)')}
     if pnl_cols and 'initial_1r_usd' not in pnl_cols:
@@ -642,6 +651,11 @@ def refresh_r_ledger(force: bool = False) -> None:
                         'VALUES (1, ?, ?, ?, ?)',
                         (float(pool['initial_base']), float(pool['pnl_offset']), float(pool['base']),
                          pool.get('updated_at')),
+                    )
+                    conn.execute('DELETE FROM swing_pool_flows')
+                    conn.executemany(
+                        'INSERT INTO swing_pool_flows (date, amount, note) VALUES (?, ?, ?)',
+                        [(f['date'], float(f['amount']), f.get('note', '')) for f in pool.get('flows', [])],
                     )
             conn.close()
             _positions_cache = None
@@ -1596,42 +1610,60 @@ def get_recap():
     conn = sqlite3.connect(DB_FILE)
     ledger = pd.read_sql_query('SELECT position_id, realized_r, net_pnl AS ledger_net, close_date FROM r_ledger', conn)
     pool = conn.execute('SELECT initial_base, pnl_offset, base, updated_at FROM swing_pool WHERE id = 1').fetchone()
+    flows = pd.read_sql_query('SELECT date, amount, note FROM swing_pool_flows', conn)
     conn.close()
+    ledger['close_day'] = pd.to_datetime(ledger['close_date'])
+    if not flows.empty:   # flow times are ISO with a UTC offset; compare in naive US/Eastern like trades
+        flows['when'] = pd.to_datetime(flows['date'], utc=True).dt.tz_convert('America/New_York').dt.tz_localize(None)
 
     if scope == 'swing':
         closed = closed.merge(ledger[['position_id', 'realized_r']], on='position_id', how='inner')
     years = sorted({int(y) for y in closed['close_time'].dt.year}, reverse=True)
     year = int(request.args.get('year') or (years[0] if years else now_et().year))
     in_year = closed[closed['close_time'].dt.year == year]
+    with_returns = scope == 'swing' and pool is not None
 
-    # Swing capital at any date = initial pool + (ledger P&L realised before that date − offset)
-    def capital_before(day: pd.Timestamp):
-        if pool is None:
-            return None
-        realised = ledger.loc[pd.to_datetime(ledger['close_date']) < day, 'ledger_net'].sum()
-        return pool[0] + (float(realised) - pool[1])
+    def flows_between(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+        if flows.empty:
+            return flows
+        return flows[(flows['when'] >= start) & (flows['when'] < end)]
 
-    months = []
-    year_start_cap = capital_before(pd.Timestamp(year=year, month=1, day=1)) if scope == 'swing' else None
-    for m in range(1, 13):
-        month_pos = in_year[in_year['close_time'].dt.month == m]
-        if month_pos.empty:
-            continue
-        row = {"month": f"{year}-{m:02d}", **_recap_stats(month_pos)}
-        if scope == 'swing' and pool is not None:
+    # Swing capital at a date = initial pool + capital moved in/out + (ledger P&L realised − offset)
+    def capital_before(day: pd.Timestamp) -> float:
+        realised = float(ledger.loc[ledger['close_day'] < day, 'ledger_net'].sum())
+        moved = float(flows.loc[flows['when'] < day, 'amount'].sum()) if not flows.empty else 0.0
+        return pool[0] + moved + (realised - pool[1])
+
+    def month_return(start: pd.Timestamp, end: pd.Timestamp):
+        """Modified Dietz: realised P&L ÷ (capital at start + each flow weighted by the share of
+        the month it was in the pool) — so money added or withdrawn never counts as return."""
+        pnl = float(ledger.loc[(ledger['close_day'] >= start) & (ledger['close_day'] < end), 'ledger_net'].sum())
+        span = (end - start).total_seconds()
+        f = flows_between(start, end)
+        weighted = float(sum(row.amount * (end - row.when).total_seconds() / span for row in f.itertuples()))
+        base = capital_before(start) + weighted
+        return (pnl / base if base > 0 else 0.0), float(f['amount'].sum()) if not f.empty else 0.0
+
+    month_keys = set(in_year['close_time'].dt.month)
+    if with_returns and not flows.empty:
+        month_keys |= set(flows.loc[flows['when'].dt.year == year, 'when'].dt.month)
+
+    months, growth, year_flows = [], 1.0, 0.0
+    for m in sorted(month_keys):
+        row = {"month": f"{year}-{m:02d}", **_recap_stats(in_year[in_year['close_time'].dt.month == m])}
+        if with_returns:
             start = pd.Timestamp(year=year, month=m, day=1)
-            end = start + pd.offsets.MonthBegin(1)
-            cap_start, cap_end = capital_before(start), capital_before(end)
-            row["capital_start"] = round(cap_start, 2)
-            row["return_pct"] = round((cap_end - cap_start) / cap_start * 100, 2)
-            row["cumulative_pct"] = round((cap_end / year_start_cap - 1) * 100, 2)
+            r, moved = month_return(start, start + pd.offsets.MonthBegin(1))
+            growth *= 1 + r
+            year_flows += moved
+            row.update(capital_start=round(capital_before(start), 2), flows=round(moved, 2),
+                       return_pct=round(r * 100, 2), cumulative_pct=round((growth - 1) * 100, 2))
         months.append(row)
 
     summary = _recap_stats(in_year)
-    if scope == 'swing' and pool is not None and year_start_cap:
-        year_end_cap = capital_before(pd.Timestamp(year=year + 1, month=1, day=1))
-        summary["return_pct"] = round((year_end_cap / year_start_cap - 1) * 100, 2)
-        summary["capital_start"] = round(year_start_cap, 2)
+    if with_returns:
+        summary.update(return_pct=round((growth - 1) * 100, 2), flows=round(year_flows, 2),
+                       capital_start=round(capital_before(pd.Timestamp(year=year, month=1, day=1)), 2))
 
     return jsonify({
         "status": "success", "scope": scope, "year": year, "years": years,
