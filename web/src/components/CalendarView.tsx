@@ -2,8 +2,8 @@ import { useMemo } from 'react'
 import { pnlColor, signedUsd } from '../lib/format'
 import type { JournalDay } from '../types'
 
-const PROFIT = ['#064e3b', '#047857', '#059669', '#10b981', '#34d399']
-const LOSS   = ['#7f1d1d', '#991b1b', '#b91c1c', '#dc2626', '#f87171']
+const PROFIT = ['#064e3b', '#047857', '#059669', '#10b981', '#3fd49a']
+const LOSS   = ['#7f1d1d', '#991b1b', '#b91c1c', '#dc2626', '#f47a7a']
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 const iso = (d: Date) =>
@@ -37,7 +37,7 @@ function YearHeatmap({ byDate, shade, onSelect }: {
     weeks[weeks.length - 1].push(new Date(d))
   }
   return (
-    <div className="hidden md:block bg-white/5 rounded-xl border border-white/10 p-4 mb-4 overflow-x-auto">
+    <div className="hidden md:block card p-4 mb-4 overflow-x-auto">
       <p className="text-xs text-slate-500 mb-2">Past year</p>
       <div className="flex gap-[3px]">
         {weeks.map((week, i) => (
@@ -85,13 +85,15 @@ export default function CalendarView({ days, notes, onSelect }: {
           const pnl = monthDays.reduce((s, d) => s + d.pnl_value, 0)
           const closed = monthDays.reduce((s, d) => s + d.closed, 0)
           const wins = monthDays.reduce((s, d) => s + Number(d.wins), 0)
+          const partial = monthDays.reduce((s, d) => s + (d.partial_value ?? 0), 0)
           return (
-            <div key={key} className="bg-white/5 rounded-xl border border-white/10 p-3 sm:p-4">
+            <div key={key} className="card p-3 sm:p-4">
               <div className="flex items-baseline justify-between mb-3 gap-2 flex-wrap">
                 <h3 className="text-sm font-medium text-white">{first.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</h3>
                 <span className="text-xs text-slate-500">
                   {closed} closed{closed ? ` · ${Math.round((wins / closed) * 100)}% win` : ''} ·{' '}
                   <span className={pnlColor(pnl)}>{signedUsd(pnl)}</span>
+                  {Math.abs(partial) >= 0.005 && <span className="text-slate-600"> · partials {signedUsd(partial)}</span>}
                 </span>
               </div>
               <div className="grid grid-cols-7 gap-1 text-center">
@@ -120,7 +122,7 @@ export default function CalendarView({ days, notes, onSelect }: {
           )
         })}
       </div>
-      <p className="text-[11px] text-slate-600 mt-3">Shading ranks each day against your other winning or losing days. A dot marks a day note.</p>
+      <p className="text-[11px] text-slate-600 mt-3">Day P&amp;L and win rate count positions closed that day, net of all their fees; a partial sell is counted when its position closes. Shading ranks each day against your other winning or losing days. A dot marks a day note.</p>
     </div>
   )
 }

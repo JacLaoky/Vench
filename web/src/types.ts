@@ -90,7 +90,8 @@ export interface TagCount { tag: string; count: number }
 export interface JournalDay {
   date: string
   weekday: string
-  pnl_value: number
+  pnl_value: number        // net P&L of positions that closed this day
+  partial_value: number    // net P&L of exits from positions still open after this day
   comm_value: number
   closed: number
   wins: string

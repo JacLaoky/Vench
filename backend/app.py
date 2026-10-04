@@ -1324,10 +1324,23 @@ def get_journal_data():
     df['date']           = df['create_time'].dt.strftime('%Y-%m-%d')
     df['month_sort_key'] = df['create_time'].dt.strftime('%Y-%m')
 
-    # Wins/losses count positions that closed on that day/month (not individual sell orders)
+    # Every figure on a day/month (P&L, wins, losses) counts positions that closed in it,
+    # net of all their fills' fees. Exits from positions still open then are reported
+    # separately as partial_value, so a partial sell never mixes into the closed-position stats.
     cp = closed_positions('AT')
-    closed_by_day   = cp.groupby(cp['close_time'].dt.strftime('%Y-%m-%d'))['is_win'] if not cp.empty else None
-    closed_by_month = cp.groupby(cp['close_time'].dt.strftime('%Y-%m'))['is_win'] if not cp.empty else None
+    if not cp.empty:
+        cp_day   = cp['close_time'].dt.strftime('%Y-%m-%d')
+        cp_month = cp['close_time'].dt.strftime('%Y-%m')
+        closed_by_day      = cp.groupby(cp_day)['is_win']
+        closed_by_month    = cp.groupby(cp_month)['is_win']
+        closed_pnl_day     = cp.groupby(cp_day)['net_pnl'].sum()
+        closed_pnl_month   = cp.groupby(cp_month)['net_pnl'].sum()
+        closed_pnl_day_sym = cp.groupby([cp_day, 'code'])['net_pnl'].sum()
+        close_day_of       = dict(zip(cp['position_id'], cp_day))
+    else:
+        closed_by_day = closed_by_month = None
+        closed_pnl_day = closed_pnl_month = closed_pnl_day_sym = pd.Series(dtype=float)
+        close_day_of = {}
 
     def _win_loss(groups, key):
         if groups is None or key not in groups.groups:
@@ -1339,7 +1352,10 @@ def get_journal_data():
     daily_data = []
     for date_str, grp in df.groupby('date'):
         dt_obj     = datetime.strptime(date_str, '%Y-%m-%d')
-        daily_pnl  = grp['net_realized_pnl'].sum()
+        daily_pnl  = float(closed_pnl_day.get(date_str, 0.0))
+        exits      = grp[grp['realized_pnl'] != 0]
+        partial    = exits[exits['position_id'].map(close_day_of) != date_str]
+        partial_pnl = float(partial['net_realized_pnl'].sum())
         wins, losses = _win_loss(closed_by_day, date_str)
         win_pct    = f"{int(wins / (wins + losses) * 100)}%" if wins + losses else "0%"
 
@@ -1347,7 +1363,8 @@ def get_journal_data():
         ticker_pills = []
         for ticker, g in grp.groupby('code'):
             clean   = ticker.replace('US.', '')
-            grp_pnl = g['net_realized_pnl'].sum()
+            key     = (date_str, ticker)
+            grp_pnl = closed_pnl_day_sym[key] if key in closed_pnl_day_sym.index else g['net_realized_pnl'].sum()
             # Only rows with realized_pnl != 0 (actual closes)
             closes  = g[g['realized_pnl'] != 0].sort_values('create_time', ascending=False)
             cards   = [build_trade_card(row, df) for _, row in closes.iterrows()]
@@ -1370,7 +1387,8 @@ def get_journal_data():
             "comm":     f"${grp['fee'].sum():.2f}",
             "tickers":  ticker_pills,
             # numeric twins of the display strings above
-            "pnl_value":  round(float(daily_pnl), 2),
+            "pnl_value":  round(daily_pnl, 2),
+            "partial_value": round(partial_pnl, 2),
             "comm_value": round(float(grp['fee'].sum()), 2),
             "closed":     wins + losses,
         })
@@ -1381,7 +1399,7 @@ def get_journal_data():
     monthly_data = []
     for month_key, grp in df.groupby('month_sort_key'):
         grp_sorted  = grp.sort_values('create_time')
-        monthly_pnl = grp_sorted['net_realized_pnl'].sum()
+        monthly_pnl = float(closed_pnl_month.get(month_key, 0.0))
         wins, losses = _win_loss(closed_by_month, month_key)
         win_pct     = f"{int(wins / (wins + losses) * 100)}%" if wins + losses else "0%"
         month_cp    = cp[cp['close_time'].dt.strftime('%Y-%m') == month_key] if not cp.empty else cp
@@ -1392,13 +1410,12 @@ def get_journal_data():
         chart_data  = [{"date": month_start, "value": 0.0}]
         cum_pnl     = 0.0
 
-        for _, r in grp_sorted.iterrows():
-            if r['realized_pnl'] != 0:
-                cum_pnl += r['net_realized_pnl']
-                chart_data.append({
-                    "date":  r['create_time'].strftime('%b %d'),
-                    "value": round(cum_pnl, 2),
-                })
+        for _, r in month_cp.iterrows():
+            cum_pnl += r['net_pnl']
+            chart_data.append({
+                "date":  r['close_time'].strftime('%b %d'),
+                "value": round(cum_pnl, 2),
+            })
 
         if len(chart_data) == 1:
             chart_data.append({"date": month_start, "value": 0.0})

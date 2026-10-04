@@ -4,7 +4,7 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, Refere
 import { api } from '../api'
 import { useApi } from '../lib/useApi'
 import { usePersistentState } from '../lib/usePersistentState'
-import { fmtR, pnlColor, rColor, signedUsd } from '../lib/format'
+import { fmtR, pnlColor, rColor, signedUsd, usd } from '../lib/format'
 import TradeDetail from '../components/TradeDetail'
 import DayDetail from '../components/DayDetail'
 import CalendarView from '../components/CalendarView'
@@ -41,12 +41,13 @@ const shortDate = (date: string) =>
 
 function DayCard({ day, note, onOpen }: { day: JournalDay; note: string; onOpen: () => void }) {
   return (
-    <button onClick={onOpen} className="w-full text-left p-3 sm:p-4 rounded-xl border bg-white/5 border-white/10 hover:border-white/20 transition-colors">
+    <button onClick={onOpen} className="w-full text-left p-3 sm:p-4 card card-hover">
       <div className="flex justify-between items-start gap-2">
         <div>
           <p className="text-sm font-medium text-white">{shortDate(day.date)}</p>
           <p className="text-xs text-slate-500 mt-0.5">
-            {day.trades} fills{day.closed ? ` · ${day.wins}W ${day.losses}L · ${day.winPct}` : ''} · fees ${day.comm_value.toFixed(2)}
+            {day.trades} fills{day.closed ? ` · ${day.wins}W ${day.losses}L · ${day.winPct}` : ''} · fees {usd(day.comm_value)}
+            {day.partial_value !== 0 && <> · partials <span className={pnlColor(day.partial_value)}>{signedUsd(day.partial_value)}</span></>}
           </p>
         </div>
         <span className={`text-base font-semibold ${pnlColor(day.pnl_value)}`}>{signedUsd(day.pnl_value)}</span>
@@ -69,7 +70,7 @@ function DayCard({ day, note, onOpen }: { day: JournalDay; note: string; onOpen:
 
 function MonthCard({ month, onOpen }: { month: JournalMonth; onOpen: () => void }) {
   return (
-    <button onClick={onOpen} className="w-full text-left p-4 rounded-xl border bg-white/5 border-white/10 hover:border-white/20 transition-colors">
+    <button onClick={onOpen} className="w-full text-left p-4 card card-hover">
       <div className="flex justify-between items-start">
         <div>
           <p className="text-sm font-medium text-white">{month.monthYear}</p>
@@ -82,7 +83,7 @@ function MonthCard({ month, onOpen }: { month: JournalMonth; onOpen: () => void 
       <div className="h-12 mt-2 -mx-1">
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={month.chart_data}>
-            <Line type="monotone" dataKey="value" dot={false} strokeWidth={2} stroke={month.profit_value >= 0 ? '#34d399' : '#f87171'} isAnimationActive={false} />
+            <Line type="monotone" dataKey="value" dot={false} strokeWidth={2} stroke={month.profit_value >= 0 ? '#3fd49a' : '#f47a7a'} isAnimationActive={false} />
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -93,7 +94,7 @@ function MonthCard({ month, onOpen }: { month: JournalMonth; onOpen: () => void 
 const Tip = ({ active, payload, label }: { active?: boolean; payload?: { value: number }[]; label?: string }) => {
   if (!active || !payload?.length) return null
   return (
-    <div className="bg-[#1a1d27] border border-white/10 rounded-lg px-3 py-2 text-xs">
+    <div className="bg-surface-3 border border-line-strong rounded-lg px-3 py-2 text-xs">
       <p className="text-slate-400 mb-1">{label}</p>
       <p className="text-violet-400">{signedUsd(payload[0].value)}</p>
     </div>
@@ -136,8 +137,8 @@ export default function Journal() {
   return (
     <div>
       <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
-        <h1 className="text-xl font-semibold text-white">Trade Journal</h1>
-        <div className="flex gap-1 bg-white/5 rounded-lg p-1">
+        <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white">Trade Journal</h1>
+        <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5">
           {(['days', 'calendar', 'months', 'trades'] as const).map(v => (
             <button key={v} onClick={() => setView(v)}
               className={`px-3 py-1 rounded-md text-sm transition-colors capitalize ${view === v ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -152,17 +153,17 @@ export default function Journal() {
           <div className="relative">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500" />
             <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search ticker…"
-              className="pl-8 pr-3 py-1.5 bg-white/5 border border-white/10 rounded-lg text-sm text-white placeholder-slate-600 focus:outline-none focus:border-violet-500 w-36" />
+              className="pl-8 pr-3 py-1.5 field text-sm text-white w-36" />
           </div>
           {view === 'trades' && allTags.length > 0 && (
             <div className="flex gap-1 flex-wrap">
               <button onClick={() => setTagFilter('')}
-                className={`px-2.5 py-1 rounded-full text-xs transition-colors ${!tagFilter ? 'bg-violet-600 text-white' : 'bg-white/5 text-slate-400 hover:text-white'}`}>
+                className={`px-2.5 py-1 rounded-full text-xs transition-colors ${!tagFilter ? 'bg-violet-600 text-white' : 'bg-white/[0.04] border border-line text-slate-400 hover:text-white'}`}>
                 All
               </button>
               {allTags.map(tag => (
                 <button key={tag} onClick={() => setTagFilter(tag === tagFilter ? '' : tag)}
-                  className={`px-2.5 py-1 rounded-full text-xs transition-colors ${tagFilter === tag ? 'bg-violet-600 text-white' : 'bg-white/5 text-slate-400 hover:text-white'}`}>
+                  className={`px-2.5 py-1 rounded-full text-xs transition-colors ${tagFilter === tag ? 'bg-violet-600 text-white' : 'bg-white/[0.04] border border-line text-slate-400 hover:text-white'}`}>
                   {tag}
                 </button>
               ))}
@@ -185,16 +186,16 @@ export default function Journal() {
 
       {view === 'months' && (
         <div>
-          <div className="bg-white/5 rounded-xl border border-white/10 p-4 mb-4">
-            <h2 className="text-sm font-medium text-white mb-4">Realized P&L by month</h2>
+          <div className="card p-4 mb-4">
+            <h2 className="text-sm font-semibold text-slate-100 mb-4">Realized P&L by month</h2>
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={monthBars}>
-                <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: '#64748b' }} axisLine={false} tickLine={false} width={44} />
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#6d7486' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: '#6d7486' }} axisLine={false} tickLine={false} width={44} />
                 <Tooltip content={<Tip />} cursor={{ fill: 'rgba(255,255,255,0.04)' }} />
-                <ReferenceLine y={0} stroke="#374151" />
+                <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
                 <Bar dataKey="value" radius={[4, 4, 0, 0]}>
-                  {monthBars.map((e, i) => <Cell key={i} fill={e.value >= 0 ? '#34d399' : '#f87171'} />)}
+                  {monthBars.map((e, i) => <Cell key={i} fill={e.value >= 0 ? '#3fd49a' : '#f47a7a'} />)}
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
@@ -214,7 +215,7 @@ export default function Journal() {
               return (
                 <div key={t.trade_id} onClick={() => setSelectedId(t.trade_id)}
                   className={`p-3 rounded-xl border cursor-pointer transition-colors ${
-                    selectedId === t.trade_id ? 'bg-violet-600/20 border-violet-500/50' : 'bg-white/5 border-white/10 hover:border-white/20'
+                    selectedId === t.trade_id ? 'bg-violet-600/20 border-violet-500/50' : 'card card-hover'
                   }`}>
                   <div className="flex justify-between items-start">
                     <span className="font-medium text-white text-sm">{t.ticker}</span>
@@ -241,7 +242,7 @@ export default function Journal() {
             })}
           </div>
 
-          <div className={`flex-1 min-w-0 bg-white/5 rounded-xl border border-white/10 p-4 sm:p-5 md:overflow-y-auto ${selected ? '' : 'hidden md:block'}`}>
+          <div className={`flex-1 min-w-0 card p-4 sm:p-5 md:overflow-y-auto ${selected ? '' : 'hidden md:block'}`}>
             {!selected ? (
               <p className="text-slate-500 text-sm">Select a trade to view details</p>
             ) : (
