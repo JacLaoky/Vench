@@ -9,6 +9,7 @@ import Sectors from './pages/Sectors'
 import MarketBreadth from './pages/MarketBreadth'
 import Calendar from './pages/Calendar'
 import Calculator from './pages/Calculator'
+import TagStats from './pages/TagStats'
 import JournalAI from './components/JournalAI'
 
 export default function App() {
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="/all-trades" element={<AllTrades />} />
           <Route path="/stats" element={<Stats />} />
           <Route path="/performance" element={<Performance />} />
+          <Route path="/tags" element={<TagStats />} />
           <Route path="/sectors" element={<Sectors />} />
           <Route path="/breadth" element={<MarketBreadth />} />
           <Route path="/calendar" element={<Calendar />} />

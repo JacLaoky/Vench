@@ -4,6 +4,8 @@ import { api } from '../api'
 import { useApi } from '../lib/useApi'
 import { fmtR, pnlColor, rColor, signedUsd } from '../lib/format'
 import TradeDetail from '../components/TradeDetail'
+import { ErrorState, Loading } from '../components/PageState'
+import { tagColor } from '../lib/tags'
 import type { Trade } from '../types'
 
 type SortKey = 'exit_time' | 'pnl' | 'r' | 'ticker'
@@ -21,7 +23,7 @@ function SortBtn({ active, asc, label, onClick }: { active: boolean; asc: boolea
 }
 
 export default function AllTrades() {
-  const { data, setData, error, loading } = useApi(() => api.getAllTrades().then(d => d.data ?? []), [])
+  const { data, setData, error, loading, reload } = useApi(() => api.getAllTrades().then(d => d.data ?? []), [])
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [tag, setTag] = useState('')
@@ -57,8 +59,8 @@ export default function AllTrades() {
     else { setSort(key); setSortAsc(false) }
   }
 
-  if (loading) return <div className="text-slate-500 text-sm">Loading…</div>
-  if (error) return <div className="text-red-400 text-sm">Error: {error}</div>
+  if (loading && !data) return <Loading rows={6} />
+  if (error && !data) return <ErrorState message={error} onRetry={reload} />
 
   return (
     <div>
@@ -135,7 +137,7 @@ export default function AllTrades() {
                   <td className="px-4 py-2.5 hidden lg:table-cell">
                     <div className="flex gap-1 flex-wrap">
                       {t.tags?.map(tg => (
-                        <span key={tg} className="text-xs px-1.5 py-0.5 bg-violet-600/20 text-violet-400 rounded-full">{tg}</span>
+                        <span key={tg} className="text-xs px-1.5 py-0.5 rounded-full" style={tagColor(tg)}>{tg}</span>
                       ))}
                     </div>
                   </td>

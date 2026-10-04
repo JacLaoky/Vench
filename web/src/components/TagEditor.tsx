@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { X } from 'lucide-react'
 import { api } from '../api'
+import { PRESET_TAGS, tagColor } from '../lib/tags'
 
 // Tag suggestions, shared by every editor on the page and fetched once
 let knownTagsCache: string[] | null = null
@@ -42,13 +43,15 @@ export default function TagEditor({ tradeId, tags, onChange }: {
     if (t && !tags.includes(t)) save([...tags, t])
   }
 
-  const suggestions = known.filter(t => !tags.includes(t) && t.toLowerCase().includes(input.toLowerCase())).slice(0, 6)
+  // tags you've already used first, then the presets; narrowed as you type
+  const pool = [...new Set([...known, ...PRESET_TAGS])]
+  const suggestions = pool.filter(t => !tags.includes(t) && t.toLowerCase().includes(input.trim().toLowerCase())).slice(0, 10)
 
   return (
     <div>
       <div className="flex gap-1.5 flex-wrap items-center">
         {tags.map(tag => (
-          <span key={tag} className="flex items-center gap-1 text-xs pl-2 pr-1 py-0.5 bg-violet-600/20 text-violet-300 rounded-full">
+          <span key={tag} className="flex items-center gap-1 text-xs pl-2 pr-1 py-0.5 rounded-full" style={tagColor(tag)}>
             {tag}
             <button onClick={() => save(tags.filter(t => t !== tag))} className="hover:text-white" aria-label={`Remove ${tag}`}>
               <X size={11} />
@@ -60,7 +63,7 @@ export default function TagEditor({ tradeId, tags, onChange }: {
           placeholder="+ tag"
           className="w-24 bg-transparent border-b border-white/10 text-xs text-white placeholder-slate-600 focus:outline-none focus:border-violet-500 py-0.5" />
       </div>
-      {input === '' && suggestions.length > 0 && (
+      {suggestions.length > 0 && (
         <div className="flex gap-1 flex-wrap mt-2">
           {suggestions.map(t => (
             <button key={t} onClick={() => add(t)}

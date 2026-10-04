@@ -1,5 +1,7 @@
 import axios from 'axios'
-import type { Account, HoldingDetail, Position, TagCount, Trade } from './types'
+import type {
+  Account, DeepStats, HoldingDetail, JournalResponse, Position, RStats, SectorDetail, TagCount, TagStat, Trade,
+} from './types'
 
 /** Same origin in production (Flask serves the build); the Vite dev server proxies /api. */
 export const API_BASE = '/api'
@@ -21,10 +23,14 @@ export const api = {
   getPortfolio:        () => get<{ data: Position[] }>('/portfolio'),
   getAccount:          () => get<Account>('/account'),
   getStats:            (period = 'AT') => get('/stats', { period }),
-  getJournal:          () => get('/journal'),
+  getJournal:          () => get<JournalResponse>('/journal'),
   getAllTrades:        () => get<{ data: Trade[] }>('/all_trades'),
   getTags:             () => get<{ tags: TagCount[] }>('/tags'),
-  getTagStats:         (timeframe = 'AT') => get('/tag_stats', { timeframe }),
+  getTagStats:         (timeframe = 'AT') => get<{ data: TagStat[] }>('/tag_stats', { timeframe }),
+  /** month: "October, 2026" (the backend's month label) */
+  getMonthDetail:      (month: string) =>
+    get<{ status: string; data?: DeepStats & { r: RStats }; trades?: Trade[] }>('/monthly_details', { month }),
+  getSectorDetail:     (ticker: string) => get<SectorDetail>('/sector_detail', { ticker }),
   getPerformance:      (period = 'AT') => get('/performance', { period }),
   getSectors:          (type?: string, period = '1D') => get('/sectors', { period, ...(type ? { type } : {}) }),
   getMarketBreadth:    (period = '1D') => get('/market_breadth', { period }),
@@ -33,6 +39,7 @@ export const api = {
     get<HoldingDetail>(`/holdings/${enc(ticker)}/trades`, positionId ? { position_id: positionId } : undefined),
 
   getDailyNote:  (date: string) => get<{ note: string }>(`/daily_notes/${enc(date)}`),
+  getDailyNotes: () => get<Record<string, string>>('/daily_notes'),
   saveDailyNote: (date: string, note: string) => http.post(`/daily_notes/${enc(date)}`, { note }).then(r => r.data),
   saveNote:      (tradeId: string, note: string) => http.post(`/notes/${enc(tradeId)}`, { note }).then(r => r.data),
   setTags:       (tradeId: string, tags: string[]) =>

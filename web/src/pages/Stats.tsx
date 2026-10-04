@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react'
 import { api } from '../api'
+import { useApi } from '../lib/useApi'
+import { usePersistentState } from '../lib/usePersistentState'
+import { ErrorState, Loading } from '../components/PageState'
 import {
   AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Cell, ReferenceLine
@@ -51,21 +53,11 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 const TIMEFRAMES = ['1W', '1M', '3M', '1Y', 'YTD', 'AT'] as const
 
 export default function Stats() {
-  const [data, setData] = useState<StatsData | null>(null)
-  const [tf, setTf] = useState('AT')
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  const [tf, setTf] = usePersistentState<string>('stats.timeframe', 'AT')
+  const { data, error, loading, reload } = useApi(() => api.getStats(tf) as Promise<StatsData>, [tf])
 
-  useEffect(() => {
-    setLoading(true)
-    api.getStats(tf)
-      .then(d => setData(d))
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [tf])
-
-  if (loading) return <div className="text-slate-500 text-sm">Loading…</div>
-  if (error) return <div className="text-red-400 text-sm">Error: {error}</div>
+  if (loading && !data) return <Loading rows={4} />
+  if (error && !data) return <ErrorState message={error} onRetry={reload} />
   if (!data) return null
 
   const s = data.summary

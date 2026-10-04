@@ -1335,6 +1335,10 @@ def get_journal_data():
             "losses":   str(losses),
             "comm":     f"${grp['fee'].sum():.2f}",
             "tickers":  ticker_pills,
+            # numeric twins of the display strings above
+            "pnl_value":  round(float(daily_pnl), 2),
+            "comm_value": round(float(grp['fee'].sum()), 2),
+            "closed":     wins + losses,
         })
 
     daily_data.sort(key=lambda x: x['date'], reverse=True)
@@ -1373,6 +1377,10 @@ def get_journal_data():
             "avgGain":   f"${month_wins.mean():.2f}" if len(month_wins) else "N/A",
             "chart_data": chart_data,
             "isProfit":  bool(monthly_pnl >= 0),
+            "month_key":    month_key,
+            "profit_value": round(float(monthly_pnl), 2),
+            "win_rate":     round(wins / (wins + losses), 4) if wins + losses else None,
+            "closed":       wins + losses,
         })
 
     monthly_data.sort(key=lambda x: x['sort_key'], reverse=True)

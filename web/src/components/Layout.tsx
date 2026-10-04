@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, BookOpen, BarChart2, TrendingUp,
-  Calendar, Activity, List, Calculator, RefreshCw, Waves, Menu, X,
+  Calendar, Activity, List, Calculator, RefreshCw, Waves, Menu, X, Tags, RotateCw,
 } from 'lucide-react'
 import { api } from '../api'
 
@@ -12,6 +12,7 @@ const nav = [
   { to: '/all-trades',  label: 'All Trades',   icon: List },
   { to: '/stats',       label: 'Stats',        icon: BarChart2 },
   { to: '/performance', label: 'Performance',  icon: Activity },
+  { to: '/tags',        label: 'Tags',         icon: Tags },
   { to: '/sectors',     label: 'Sectors',      icon: TrendingUp },
   { to: '/breadth',     label: 'Breadth',      icon: Waves },
   { to: '/calendar',    label: 'Calendar',     icon: Calendar },
@@ -88,9 +89,14 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         <header className="md:hidden sticky top-0 z-40 bg-[#0f1117]/95 backdrop-blur border-b border-white/10 pt-[env(safe-area-inset-top)]">
           <div className="flex items-center justify-between px-4 h-12">
             <span className="text-base font-semibold text-white">Vench <span className="text-xs text-slate-500 font-normal ml-1">{current?.label}</span></span>
-            <button onClick={() => setMenuOpen(o => !o)} className="text-slate-300 p-1" aria-label="Menu">
-              {menuOpen ? <X size={20} /> : <Menu size={20} />}
-            </button>
+            <div className="flex items-center gap-1">
+              <button onClick={() => window.location.reload()} className="text-slate-400 p-1.5" aria-label="Refresh">
+                <RotateCw size={17} />
+              </button>
+              <button onClick={() => setMenuOpen(o => !o)} className="text-slate-300 p-1" aria-label="Menu">
+                {menuOpen ? <X size={20} /> : <Menu size={20} />}
+              </button>
+            </div>
           </div>
           {menuOpen && (
             <div className="px-3 pb-3 border-t border-white/10 pt-2">

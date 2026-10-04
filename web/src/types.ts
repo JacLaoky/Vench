@@ -86,3 +86,75 @@ export interface RStats {
 }
 
 export interface TagCount { tag: string; count: number }
+
+export interface JournalDay {
+  date: string
+  weekday: string
+  pnl_value: number
+  comm_value: number
+  closed: number
+  wins: string
+  losses: string
+  winPct: string
+  trades: string
+  tickers: { name: string; win: boolean; trades: Trade[] }[]
+}
+
+export interface JournalMonth {
+  month_key: string
+  monthYear: string
+  profit_value: number
+  win_rate: number | null
+  closed: number
+  avgGain: string
+  chart_data: { date: string; value: number }[]
+}
+
+export interface JournalResponse { daily: JournalDay[]; monthly: JournalMonth[] }
+
+type AllWonLost = { all: string; won: string; lost: string }
+export interface SymbolStat {
+  symbol: string
+  pnl_raw: number
+  isProfit: boolean
+  trades: AllWonLost
+  amount: AllWonLost
+}
+
+export interface DeepStats {
+  gain_loss: { total: AllWonLost; avg_usd: AllWonLost; avg_pct: AllWonLost; trades: AllWonLost; win_rate: string }
+  long_short: { long: AllWonLost; short: AllWonLost }
+  timing: { holding: AllWonLost; entry_hour: AllWonLost }
+  best_worst: { largest_usd: { won: string; lost: string }; largest_pct: { won: string; lost: string } }
+  symbols_by_trades: SymbolStat[]
+  symbols_by_amount: SymbolStat[]
+}
+
+export interface TagStat {
+  tag: string
+  count: number
+  wins: number
+  losses: number
+  win_rate: number
+  total_pnl: number
+  avg_pnl: number
+  avg_win: number
+  avg_loss: number
+  best_trade: number
+  worst_trade: number
+}
+
+export interface SectorDetail {
+  ticker: string
+  price: number
+  change_1d: number
+  closes_50d: number[]
+  ma10: number; ma10_pct: number
+  ma20: number; ma20_pct: number
+  ma50: number; ma50_pct: number
+  ma200: number; ma200_pct: number
+  rsi14: number | null
+  ytd_pct: number
+  week52_high: number
+  week52_high_pct: number
+}

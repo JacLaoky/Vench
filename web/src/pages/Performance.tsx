@@ -1,11 +1,13 @@
 import { useState, useCallback } from 'react'
+import { usePersistentState } from '../lib/usePersistentState'
+import { ErrorState, Loading } from '../components/PageState'
 import { X } from 'lucide-react'
 import { api } from '../api'
 import { useApi } from '../lib/useApi'
 import { fmtR, rColor } from '../lib/format'
-import type { RStats } from '../types'
+import type { DeepStats, RStats } from '../types'
 import {
-  AreaChart, Area, BarChart, Bar, XAxis, YAxis, Tooltip,
+  ComposedChart, Area, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Cell, ReferenceLine
 } from 'recharts'
 
@@ -22,11 +24,7 @@ interface PerfData {
   monthly_bars: { label: string; value: number; isProfit: boolean }[]
   dow_stats: { label: string; pnl: number; trades: number; win_rate: number; isProfit: boolean }[]
   drawdown_curve: { date: string; drawdown: number; equity: number }[]
-  deep_stats: {
-    gain_loss: { avg_usd: { won: string; lost: string; all: string }; win_rate: string; trades: { won: string; lost: string } }
-    best_worst: { largest_usd: { won: string; lost: string }; largest_pct: { won: string; lost: string } }
-    symbols_by_amount: { symbol: string; pnl_raw: number; isProfit: boolean; trades: { all: string } }[]
-  }
+  deep_stats: DeepStats
 }
 
 const TIMEFRAMES = ['1W', '1M', '3M', '1Y', 'YTD', 'AT'] as const
@@ -259,10 +257,39 @@ function RSection({ r }: { r: RStats }) {
   )
 }
 
+function BreakdownTables({ deep }: { deep: DeepStats }) {
+  const rows: [string, { all: string; won: string; lost: string }][] = [
+    ['Long positions', deep.long_short.long],
+    ['Short positions', deep.long_short.short],
+    ['Avg hold', deep.timing.holding],
+    ['Avg entry time (ET)', deep.timing.entry_hour],
+    ['Avg return %', deep.gain_loss.avg_pct],
+    ['Avg P&L', deep.gain_loss.avg_usd],
+  ]
+  return (
+    <div className="bg-white/5 rounded-xl border border-white/10 p-4 mb-4">
+      <h2 className="text-sm font-medium text-white mb-3">Breakdown <span className="text-xs text-slate-500 font-normal ml-1">per closed position</span></h2>
+      <table className="w-full text-sm">
+        <thead><tr className="text-[11px] text-slate-500"><th /><th className="text-right font-normal">All</th><th className="text-right font-normal">Won</th><th className="text-right font-normal">Lost</th></tr></thead>
+        <tbody>
+          {rows.map(([label, v]) => (
+            <tr key={label} className="border-b border-white/5 last:border-0">
+              <td className="py-1.5 text-slate-400">{label}</td>
+              <td className="py-1.5 text-right text-white">{v.all}</td>
+              <td className="py-1.5 text-right text-emerald-400">{v.won}</td>
+              <td className="py-1.5 text-right text-red-400">{v.lost}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 export default function Performance() {
-  const [tf, setTf] = useState('AT')
+  const [tf, setTf] = usePersistentState<string>('performance.timeframe', 'AT')
   const [selectedSymbol, setSelectedSymbol] = useState<SymbolSummary | null>(null)
-  const { data: loaded, error, loading } = useApi(
+  const { data: loaded, error, loading, reload } = useApi(
     () => Promise.all([api.getPerformance(tf) as Promise<PerfData>, api.getAllTrades()]), [tf],
   )
   const data = loaded?.[0] ?? null
@@ -270,8 +297,8 @@ export default function Performance() {
 
   const openSymbol = useCallback((s: SymbolSummary) => setSelectedSymbol(s), [])
 
-  if (loading && !data) return <div className="text-slate-500 text-sm">Loading…</div>
-  if (error) return <div className="text-red-400 text-sm">Error: {error}</div>
+  if (loading && !data) return <Loading rows={5} />
+  if (error && !data) return <ErrorState message={error} onRetry={reload} />
   if (!data) return null
 
   const s = data.summary
@@ -325,9 +352,12 @@ export default function Performance() {
         {/* Drawdown curve */}
         {data.drawdown_curve?.length > 0 && (
           <div className="bg-white/5 rounded-xl border border-white/10 p-4">
-            <h2 className="text-sm font-medium text-white mb-4">Drawdown Curve</h2>
+            <h2 className="text-sm font-medium text-white mb-4">
+              Equity <span className="text-violet-400">—</span> &amp; Drawdown <span className="text-red-400">▆</span>
+              <span className="text-xs text-slate-500 font-normal ml-2">cumulative realized P&L per day</span>
+            </h2>
             <ResponsiveContainer width="100%" height={180}>
-              <AreaChart data={data.drawdown_curve}>
+              <ComposedChart data={data.drawdown_curve}>
                 <defs>
                   <linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="5%" stopColor="#f87171" stopOpacity={0.3} />
@@ -338,8 +368,9 @@ export default function Performance() {
                 <YAxis tick={{ fontSize: 10, fill: '#64748b' }} axisLine={false} tickLine={false} />
                 <Tooltip content={<Tip />} />
                 <ReferenceLine y={0} stroke="#374151" />
-                <Area type="monotone" dataKey="drawdown" stroke="#f87171" fill="url(#ddGrad)" strokeWidth={2} name="Drawdown" dot={false} />
-              </AreaChart>
+                <Area type="monotone" dataKey="drawdown" stroke="#f87171" fill="url(#ddGrad)" strokeWidth={1.5} name="Drawdown" dot={false} />
+                <Line type="monotone" dataKey="equity" stroke="#a78bfa" strokeWidth={2} name="Equity" dot={false} />
+              </ComposedChart>
             </ResponsiveContainer>
           </div>
         )}
@@ -379,6 +410,16 @@ export default function Performance() {
                 </Bar>
               </BarChart>
             </ResponsiveContainer>
+            <div className="grid grid-cols-5 text-center text-[11px] mt-2 border-t border-white/5 pt-2">
+              {data.dow_stats.map(d => (
+                <div key={d.label}>
+                  <p className="text-slate-300">{d.trades} closed</p>
+                  <p className={d.trades ? (d.win_rate >= 0.5 ? 'text-emerald-400' : 'text-red-400') : 'text-slate-600'}>
+                    {d.trades ? `${Math.round(d.win_rate * 100)}% win` : '—'}
+                  </p>
+                </div>
+              ))}
+            </div>
           </div>
         )}
 
@@ -387,6 +428,8 @@ export default function Performance() {
           <SymbolRanking symbols={data.deep_stats.symbols_by_amount} onSelect={openSymbol} />
         )}
       </div>
+
+      <BreakdownTables deep={data.deep_stats} />
 
       {selectedSymbol && (
         <SymbolPanel

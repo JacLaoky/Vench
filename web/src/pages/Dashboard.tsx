@@ -4,6 +4,7 @@ import { api } from '../api'
 import { useApi } from '../lib/useApi'
 import { pnlColor, signedUsd, usd } from '../lib/format'
 import PositionDrawer from '../components/PositionDrawer'
+import { ErrorState, Loading } from '../components/PageState'
 import type { Position } from '../types'
 
 function StatCard({ label, value, positive }: { label: string; value: string; positive?: boolean }) {
@@ -20,13 +21,13 @@ function StatCard({ label, value, positive }: { label: string; value: string; po
 const pct = (n: number) => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`
 
 export default function Dashboard() {
-  const { data, setData, error, loading } = useApi(
+  const { data, setData, error, loading, reload } = useApi(
     () => Promise.all([api.getPortfolio(), api.getAccount()]), [],
   )
   const [selected, setSelected] = useState<Position | null>(null)
 
-  if (loading) return <div className="text-slate-500 text-sm">Loading…</div>
-  if (error || !data) return <div className="text-red-400 text-sm">Error: {error}</div>
+  if (loading && !data) return <Loading rows={5} />
+  if (error || !data) return <ErrorState message={error || 'No data'} onRetry={reload} />
 
   const [portfolio, account] = data
   const positions = portfolio.data ?? []

@@ -21,7 +21,11 @@ export default function PositionDrawer({ position, onClose, onStopSaved }: {
         <div className="flex items-center justify-between px-5 py-4 border-b border-white/10">
           <div>
             <h2 className="text-lg font-semibold text-white">{position.ticker}</h2>
-            <p className="text-xs text-slate-500">{position.side} · {position.qty} shares · avg cost ${position.cost_price.toFixed(2)}</p>
+            <p className="text-xs text-slate-500">
+              {position.side} · {position.qty} shares · avg cost ${position.cost_price.toFixed(2)}
+              {position.qty > 0 && <> · now ${(position.market_val / position.qty).toFixed(2)}</>}
+            </p>
+            <p className={`text-xs ${pnlColor(position.today_pl_val)}`}>Today {signedUsd(position.today_pl_val)}</p>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white" aria-label="Close"><X size={18} /></button>
         </div>
