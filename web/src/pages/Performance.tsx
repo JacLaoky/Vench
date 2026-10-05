@@ -1,11 +1,11 @@
 import { useState, useCallback } from 'react'
 import { usePersistentState } from '../lib/usePersistentState'
 import { ErrorState, Loading } from '../components/PageState'
-import { X } from 'lucide-react'
+import Drawer from '../components/Drawer'
 import { api } from '../api'
 import { useApi } from '../lib/useApi'
-import { fmtR, rColor, signedUsd, usd } from '../lib/format'
-import type { DeepStats, RStats } from '../types'
+import { fmtR, pnlColor, rColor, signedUsd, usd } from '../lib/format'
+import type { DeepStats, RStats, SymbolStat } from '../types'
 import {
   ComposedChart, Area, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Cell, ReferenceLine
@@ -16,7 +16,7 @@ interface Summary {
   win_loss_ratio: number; profit_factor: number; expectancy: number
   max_drawdown: number; sharpe_ratio: number; sortino_ratio: number
   kelly_pct: number; current_streak: number; current_streak_type: string
-  max_win_streak: number; max_loss_streak: number; total_pnl: number
+  max_win_streak: number; max_loss_streak: number; total_pnl: number; partial_pnl: number
 }
 interface PerfData {
   summary: Summary
@@ -53,104 +53,60 @@ const Tip = ({ active, payload, label }: any) => {
   )
 }
 
-interface SymbolTrade {
-  trade_id: string; ticker: string; trade_type: string
-  pnl: number; pct: string; isProfit: boolean
-  enter_time: string; exit_time: string; holding_time: string
-  entry_price: number; price: number; qty: number; tags: string[]
-}
+type SymbolSummary = SymbolStat
 
-interface SymbolSummary {
-  symbol: string; pnl_raw: number; isProfit: boolean; trades: { all: string }
-}
-
-function SymbolPanel({
-  symbol, allTrades, onClose
-}: {
-  symbol: SymbolSummary
-  allTrades: SymbolTrade[]
-  onClose: () => void
-}) {
-  const trades = allTrades.filter(t => t.ticker === symbol.symbol)
-  const wins = trades.filter(t => t.isProfit).length
-  const winRate = trades.length ? Math.round((wins / trades.length) * 100) : 0
-  const maxPnl = Math.max(...trades.map(t => Math.abs(t.pnl)), 1)
+/** Closed positions of one symbol in the selected period: the same set the ranking counted. */
+function SymbolPanel({ symbol, period, onClose }: { symbol: SymbolSummary; period: string; onClose: () => void }) {
+  const positions = symbol.positions ?? []
+  const won = Number(symbol.trades.won)
+  const all = Number(symbol.trades.all)
+  const winRate = all ? Math.round((won / all) * 100) : 0
+  const maxPnl = Math.max(...positions.map(p => Math.abs(p.net_pnl)), 1)
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end">
-      {/* backdrop */}
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px]" onClick={onClose} />
-
-      {/* panel */}
-      <div className="relative w-full max-w-md bg-surface border-l border-line h-full flex flex-col shadow-2xl animate-in slide-in-from-right duration-200">
-        {/* header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-line">
-          <div>
-            <h2 className="text-lg font-semibold text-white">{symbol.symbol}</h2>
-            <p className="text-xs text-slate-500">{symbol.trades.all} trades</p>
+    <Drawer title={symbol.symbol} onClose={onClose}
+      subtitle={`${all} closed position${all === 1 ? '' : 's'} · ${period === 'AT' ? 'all time' : period} · net of fees`}>
+      <div className="grid grid-cols-3 gap-2 text-center mb-5">
+        {[
+          { label: 'Total P&L', value: signedUsd(symbol.pnl_raw), color: pnlColor(symbol.pnl_raw) },
+          { label: 'Win rate', value: `${winRate}%`, color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
+          { label: 'W / L', value: `${symbol.trades.won} / ${symbol.trades.lost}`, color: 'text-white' },
+        ].map(item => (
+          <div key={item.label} className="bg-white/[0.03] border border-line rounded-lg py-2">
+            <p className="text-[11px] text-slate-500">{item.label}</p>
+            <p className={`text-sm font-semibold ${item.color}`}>{item.value}</p>
           </div>
-          <button onClick={onClose} className="text-slate-400 hover:text-white transition-colors">
-            <X size={18} />
-          </button>
-        </div>
-
-        {/* summary strip */}
-        <div className="grid grid-cols-3 gap-px bg-line border-b border-line">
-          {[
-            { label: 'Total P&L', value: signedUsd(symbol.pnl_raw), color: symbol.isProfit ? 'text-emerald-400' : 'text-red-400' },
-            { label: 'Win Rate', value: `${winRate}%`, color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
-            { label: 'W / L', value: `${wins} / ${trades.length - wins}`, color: 'text-white' },
-          ].map(item => (
-            <div key={item.label} className="bg-surface px-4 py-3 text-center">
-              <p className="text-xs text-slate-500 mb-0.5">{item.label}</p>
-              <p className={`text-sm font-semibold ${item.color}`}>{item.value}</p>
-            </div>
-          ))}
-        </div>
-
-        {/* trade list */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
-          {trades.length === 0 && <p className="text-slate-500 text-sm">No trades found</p>}
-          {trades.map(t => (
-            <div key={t.trade_id} className="card p-4">
-              <div className="flex justify-between items-start mb-2">
-                <span className={`text-xs px-1.5 py-0.5 rounded ${t.trade_type === 'LONG' ? 'bg-emerald-600/20 text-emerald-400' : 'bg-red-600/20 text-red-400'}`}>
-                  {t.trade_type}
-                </span>
-                <span className={`font-semibold ${t.isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
-                  {t.isProfit ? '+' : ''}${t.pnl.toFixed(2)}
-                  <span className="text-xs ml-1 opacity-70">({t.pct})</span>
-                </span>
-              </div>
-
-              {/* mini bar */}
-              <div className="w-full bg-white/5 rounded-full h-1.5 mb-3 overflow-hidden">
-                <div
-                  className={`h-full rounded-full ${t.isProfit ? 'bg-emerald-400' : 'bg-red-400'}`}
-                  style={{ width: `${Math.min(100, (Math.abs(t.pnl) / maxPnl) * 100)}%` }}
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-500">
-                <span>Entry <span className="text-slate-300">${t.entry_price.toFixed(2)}</span></span>
-                <span>Exit <span className="text-slate-300">${t.price.toFixed(2)}</span></span>
-                <span>Qty <span className="text-slate-300">{t.qty}</span></span>
-                <span>Held <span className="text-slate-300">{t.holding_time}</span></span>
-              </div>
-              <p className="text-xs text-slate-600 mt-2">{t.enter_time} → {t.exit_time}</p>
-
-              {t.tags?.length > 0 && (
-                <div className="flex gap-1 mt-2 flex-wrap">
-                  {t.tags.map(tag => (
-                    <span key={tag} className="text-xs px-1.5 py-0.5 bg-violet-600/20 text-violet-400 rounded-full">{tag}</span>
-                  ))}
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
+        ))}
       </div>
-    </div>
+
+      <div className="space-y-3">
+        {positions.map(p => (
+          <div key={p.position_id} className="card p-4">
+            <div className="flex justify-between items-start mb-2">
+              <span className={`text-xs px-1.5 py-0.5 rounded ${p.direction === 'LONG' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300'}`}>
+                {p.direction}
+              </span>
+              <span className={`font-semibold ${pnlColor(p.net_pnl)}`}>
+                {signedUsd(p.net_pnl)}
+                <span className="text-xs ml-1 opacity-90">({p.pct >= 0 ? '+' : ''}{p.pct.toFixed(1)}%)</span>
+                {p.r !== null && <span className={`text-xs ml-1.5 ${rColor(p.r)}`}>{fmtR(p.r)}</span>}
+              </span>
+            </div>
+            <div className="w-full bg-white/5 rounded-full h-1.5 mb-3 overflow-hidden">
+              <div className={`h-full rounded-full ${p.net_pnl >= 0 ? 'bg-emerald-400' : 'bg-red-400'}`}
+                style={{ width: `${Math.min(100, (Math.abs(p.net_pnl) / maxPnl) * 100)}%` }} />
+            </div>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-500">
+              <span>Avg entry <span className="text-slate-300">{usd(p.avg_entry)}</span></span>
+              <span>Avg exit <span className="text-slate-300">{usd(p.avg_exit)}</span></span>
+              <span>Qty <span className="text-slate-300">{p.qty}</span></span>
+              <span>Held <span className="text-slate-300">{p.held}</span></span>
+            </div>
+            <p className="text-xs text-slate-600 mt-2">{p.open_time} → {p.close_time}</p>
+          </div>
+        ))}
+      </div>
+    </Drawer>
   )
 }
 
@@ -244,10 +200,11 @@ function RSection({ r }: { r: RStats }) {
       </div>
       <ResponsiveContainer width="100%" height={160}>
         <BarChart data={r.distribution}>
-          <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} />
-          <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} width={24} />
+          <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#9097a8' }} axisLine={false} tickLine={false} />
+          <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: '#9097a8' }} axisLine={false} tickLine={false} width={24} />
           <Tooltip cursor={{ fill: 'rgba(255,255,255,0.04)' }}
-            contentStyle={{ background: '#1b2030', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, fontSize: 12 }} />
+            contentStyle={{ background: '#1b2030', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, fontSize: 12 }}
+            labelStyle={{ color: '#e3e6ee', marginBottom: 2 }} itemStyle={{ color: '#c3c8d4', padding: 0 }} />
           <Bar dataKey="count" name="Positions" radius={[4, 4, 0, 0]}>
             {r.distribution.map((d, i) => <Cell key={i} fill={d.label.startsWith('-') || d.label.startsWith('≤') ? '#f47a7a' : '#3fd49a'} />)}
           </Bar>
@@ -289,11 +246,7 @@ function BreakdownTables({ deep }: { deep: DeepStats }) {
 export default function Performance() {
   const [tf, setTf] = usePersistentState<string>('performance.timeframe', 'AT')
   const [selectedSymbol, setSelectedSymbol] = useState<SymbolSummary | null>(null)
-  const { data: loaded, error, loading, reload } = useApi(
-    () => Promise.all([api.getPerformance(tf) as Promise<PerfData>, api.getAllTrades()]), [tf],
-  )
-  const data = loaded?.[0] ?? null
-  const allTrades = (loaded?.[1].data ?? []) as unknown as SymbolTrade[]
+  const { data, error, loading, reload } = useApi(() => api.getPerformance(tf) as Promise<PerfData>, [tf])
 
   const openSymbol = useCallback((s: SymbolSummary) => setSelectedSymbol(s), [])
 
@@ -320,9 +273,10 @@ export default function Performance() {
 
       {/* KPI grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        <MetricCard label="Total P&L" value={signedUsd(s.total_pnl)} color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'} />
+        <MetricCard label="Total P&L" value={signedUsd(s.total_pnl)} color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
+          sub={`closed positions${s.partial_pnl ? ` · partials ${signedUsd(s.partial_pnl)}` : ''}`} />
         <MetricCard label="Win Rate" value={s.win_rate} color={winPct >= 50 ? 'text-emerald-400' : 'text-red-400'} sub={`${data.deep_stats.gain_loss.trades.won}W / ${data.deep_stats.gain_loss.trades.lost}L`} />
-        <MetricCard label="Profit Factor" value={String(s.profit_factor)} color={s.profit_factor >= 1 ? 'text-emerald-400' : 'text-red-400'} />
+        <MetricCard label="Profit Factor" value={s.profit_factor >= 999 ? '∞' : s.profit_factor.toFixed(2)} color={s.profit_factor >= 1 ? 'text-emerald-400' : 'text-red-400'} />
         <MetricCard label="Expectancy" value={signedUsd(s.expectancy)} color={s.expectancy >= 0 ? 'text-emerald-400' : 'text-red-400'} />
       </div>
 
@@ -352,10 +306,16 @@ export default function Performance() {
         {/* Drawdown curve */}
         {data.drawdown_curve?.length > 0 && (
           <div className="card p-4">
-            <h2 className="text-sm font-semibold text-slate-100 mb-4">
-              Equity <span className="text-violet-400">—</span> &amp; Drawdown <span className="text-red-400">▆</span>
-              <span className="text-xs text-slate-500 font-normal ml-2">cumulative realized P&L per day</span>
-            </h2>
+            <div className="flex items-baseline justify-between gap-3 flex-wrap mb-4">
+              <h2 className="text-sm font-medium text-white">
+                Equity &amp; Drawdown
+                <span className="text-xs text-slate-500 font-normal ml-2">cumulative realized P&amp;L per day</span>
+              </h2>
+              <div className="flex items-center gap-3 text-xs text-slate-400">
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-violet-400" />Equity</span>
+                <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-red-400" />Drawdown</span>
+              </div>
+            </div>
             <ResponsiveContainer width="100%" height={180}>
               <ComposedChart data={data.drawdown_curve}>
                 <defs>
@@ -364,8 +324,8 @@ export default function Performance() {
                     <stop offset="95%" stopColor="#f47a7a" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} />
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9097a8' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 10, fill: '#9097a8' }} axisLine={false} tickLine={false} />
                 <Tooltip content={<Tip />} />
                 <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
                 <Area type="monotone" dataKey="drawdown" stroke="#f47a7a" fill="url(#ddGrad)" strokeWidth={1.5} name="Drawdown" dot={false} />
@@ -378,11 +338,11 @@ export default function Performance() {
         {/* Monthly bars */}
         {data.monthly_bars?.length > 0 && (
           <div className="card p-4">
-            <h2 className="text-sm font-semibold text-slate-100 mb-4">Monthly P&L</h2>
+            <h2 className="text-sm font-medium text-white mb-4">Monthly P&L</h2>
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={data.monthly_bars}>
-                <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 10, fill: '#9097a8' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 10, fill: '#9097a8' }} axisLine={false} tickLine={false} />
                 <Tooltip content={<Tip />} />
                 <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
                 <Bar dataKey="value" radius={[4, 4, 0, 0]} name="P&L">
@@ -398,11 +358,11 @@ export default function Performance() {
         {/* DOW stats */}
         {data.dow_stats?.length > 0 && (
           <div className="card p-4">
-            <h2 className="text-sm font-semibold text-slate-100 mb-4">Day of Week</h2>
+            <h2 className="text-sm font-medium text-white mb-4">Day of Week</h2>
             <ResponsiveContainer width="100%" height={160}>
               <BarChart data={data.dow_stats}>
-                <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#6d7486' }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: '#6d7486' }} axisLine={false} tickLine={false} />
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#9097a8' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: '#9097a8' }} axisLine={false} tickLine={false} />
                 <Tooltip content={<Tip />} />
                 <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
                 <Bar dataKey="pnl" radius={[4, 4, 0, 0]} name="P&L">
@@ -434,7 +394,7 @@ export default function Performance() {
       {selectedSymbol && (
         <SymbolPanel
           symbol={selectedSymbol}
-          allTrades={allTrades}
+          period={tf}
           onClose={() => setSelectedSymbol(null)}
         />
       )}

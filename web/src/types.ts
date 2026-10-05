@@ -114,12 +114,27 @@ export interface JournalMonth {
 export interface JournalResponse { daily: JournalDay[]; monthly: JournalMonth[] }
 
 type AllWonLost = { all: string; won: string; lost: string }
+export interface SymbolPosition {
+  position_id: string
+  direction: string
+  qty: number
+  avg_entry: number
+  avg_exit: number
+  net_pnl: number
+  pct: number
+  r: number | null
+  open_time: string
+  close_time: string
+  held: string
+}
+
 export interface SymbolStat {
   symbol: string
   pnl_raw: number
   isProfit: boolean
   trades: AllWonLost
   amount: AllWonLost
+  positions: SymbolPosition[]   // the closed positions counted above, newest close first
 }
 
 export interface DeepStats {

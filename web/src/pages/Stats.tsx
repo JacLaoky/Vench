@@ -16,6 +16,7 @@ interface Summary {
   avg_gain_pct: string
   profit_factor: string
   total_pnl: number
+  partial_pnl: number
   profit_chart: Array<{ date: string; value: number }>
 }
 
@@ -28,11 +29,12 @@ interface StatsData {
   }>
 }
 
-function StatBox({ label, value, color }: { label: string; value: string; color?: string }) {
+function StatBox({ label, value, color, sub }: { label: string; value: string; color?: string; sub?: string }) {
   return (
     <div className="card p-4">
       <p className="label-caps mb-2">{label}</p>
       <p className={`text-xl font-semibold ${color ?? 'text-white'}`}>{value}</p>
+      {sub && <p className="text-xs text-slate-500 mt-1">{sub}</p>}
     </div>
   )
 }
@@ -84,14 +86,15 @@ export default function Stats() {
         <StatBox label="Win Rate" value={s.win_rate} color={winPct >= 50 ? 'text-emerald-400' : 'text-red-400'} />
         <StatBox label="Avg Gain" value={usd(s.avg_gain_usd)} color="text-emerald-400" />
         <StatBox label="Profit Factor" value={s.profit_factor} color={parseFloat(s.profit_factor) >= 1 ? 'text-emerald-400' : 'text-red-400'} />
-        <StatBox label="Total P&L" value={signedUsd(s.total_pnl)} color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'} />
+        <StatBox label="Total P&L" value={signedUsd(s.total_pnl)} color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
+          sub={`closed positions${s.partial_pnl ? ` · partials ${signedUsd(s.partial_pnl)}` : ''}`} />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
         {/* Cumulative P&L curve */}
         {s.profit_chart?.length > 0 && (
           <div className="card p-4">
-            <h2 className="text-sm font-semibold text-slate-100 mb-4">Cumulative P&L</h2>
+            <h2 className="text-sm font-medium text-white mb-4">Cumulative P&L</h2>
             <ResponsiveContainer width="100%" height={180}>
               <AreaChart data={s.profit_chart}>
                 <defs>
@@ -100,8 +103,8 @@ export default function Stats() {
                     <stop offset="95%" stopColor="#a79bfb" stopOpacity={0} />
                   </linearGradient>
                 </defs>
-                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
-                <YAxis tick={{ fontSize: 10, fill: '#6d7486' }} axisLine={false} tickLine={false} />
+                <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9097a8' }} axisLine={false} tickLine={false} interval="preserveStartEnd" />
+                <YAxis tick={{ fontSize: 10, fill: '#9097a8' }} axisLine={false} tickLine={false} />
                 <Tooltip content={<CustomTooltip />} />
                 <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
                 <Area type="monotone" dataKey="value" stroke="#a79bfb" fill="url(#pnlGrad)" strokeWidth={2} name="P&L" dot={false} />
@@ -113,11 +116,11 @@ export default function Stats() {
         {/* Last 7 days bar */}
         {data.last_7_chart?.length > 0 && (
           <div className="card p-4">
-            <h2 className="text-sm font-semibold text-slate-100 mb-4">Last 7 Days</h2>
+            <h2 className="text-sm font-medium text-white mb-4">Last 7 Days</h2>
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={data.last_7_chart}>
-                <XAxis dataKey="weekday" tick={{ fontSize: 11, fill: '#6d7486' }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: '#6d7486' }} axisLine={false} tickLine={false} />
+                <XAxis dataKey="weekday" tick={{ fontSize: 11, fill: '#9097a8' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: '#9097a8' }} axisLine={false} tickLine={false} />
                 <Tooltip content={<CustomTooltip />} />
                 <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
                 <Bar dataKey="pnl" radius={[4, 4, 0, 0]} name="P&L">

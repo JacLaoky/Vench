@@ -983,8 +983,16 @@ def deep_stats(cp: pd.DataFrame) -> dict:
         'holding_sec': (cp['close_time'] - cp['open_time']).dt.total_seconds(),
         'entry_hour':  cp['open_time'].dt.hour + cp['open_time'].dt.minute / 60.0,
         'symbol':      cp['code'].str.split('.').str[-1],
+        'position_id': cp['position_id'],
+        'open_time':   cp['open_time'],
+        'close_time':  cp['close_time'],
+        'qty':         cp['entry_qty'],
+        'avg_entry':   cp['avg_entry'],
+        'avg_exit':    cp['avg_exit'],
+        'r':           cp['r_multiple'] if 'r_multiple' in cp else None,
     }) if not cp.empty else pd.DataFrame(
-        columns=['pnl', 'pct', 'is_win', 'type', 'holding_sec', 'entry_hour', 'symbol'])
+        columns=['pnl', 'pct', 'is_win', 'type', 'holding_sec', 'entry_hour', 'symbol',
+                 'position_id', 'open_time', 'close_time', 'qty', 'avg_entry', 'avg_exit', 'r'])
     won_t  = df_t[df_t['is_win'] == True]
     lost_t = df_t[df_t['is_win'] == False]
 
@@ -1003,6 +1011,19 @@ def deep_stats(cp: pd.DataFrame) -> dict:
             },
             "pnl_raw":      round(sym_pnl, 2),
             "isProfit":     bool(sym_pnl >= 0),
+            "positions": [{
+                "position_id": str(r['position_id']),
+                "direction":   r['type'],
+                "qty":         float(r['qty']),
+                "avg_entry":   round(float(r['avg_entry']), 4),
+                "avg_exit":    round(float(r['avg_exit']), 4),
+                "net_pnl":     round(float(r['pnl']), 2),
+                "pct":         round(float(r['pct']) * 100, 2),
+                "r":           None if r['r'] is None or pd.isna(r['r']) else round(float(r['r']), 2),
+                "open_time":   r['open_time'].strftime('%Y-%m-%d %H:%M'),
+                "close_time":  r['close_time'].strftime('%Y-%m-%d %H:%M'),
+                "held":        _fmt_time(r['holding_sec']),
+            } for _, r in grp.sort_values('close_time', ascending=False).iterrows()],
             "_raw_trades":  int(len(grp)),
             "_raw_pnl_abs": abs(sym_pnl),
         })
@@ -1058,13 +1079,26 @@ def r_stats(rows: pd.DataFrame) -> dict:
     }
 
 
-def daily_pnl_series(df: pd.DataFrame) -> pd.Series:
-    """Net realized P&L per business day across the period, including flat days (zeros)."""
-    if df.empty:
+def daily_pnl_series(cp: pd.DataFrame) -> pd.Series:
+    """Net P&L of positions closed each business day across the period, including flat days (zeros)."""
+    if cp.empty:
         return pd.Series(dtype=float)
-    daily = df.groupby(df['create_time'].dt.normalize())['net_realized_pnl'].sum()
+    daily = cp.groupby(cp['close_time'].dt.normalize())['net_pnl'].sum()
     days = pd.bdate_range(daily.index.min(), daily.index.max())
     return daily.reindex(days.union(daily.index), fill_value=0.0)
+
+
+def trading_weekday(ts: pd.Series) -> pd.Series:
+    """Mon=0..Fri=4. Overnight-session fills on Sunday evening count for Monday, early Saturday for Friday."""
+    wd = ts.dt.dayofweek
+    return wd.where(wd < 5, wd.map({5: 4, 6: 0}))
+
+
+def partial_exit_pnl(df: pd.DataFrame, cp: pd.DataFrame) -> float:
+    """Net P&L of exit fills in the period whose position did not close in it (still open, or closed later)."""
+    exits = df[df['realized_pnl'] != 0]
+    closed_ids = set(cp['position_id']) if not cp.empty else set()
+    return float(exits[~exits['position_id'].isin(closed_ids)]['net_realized_pnl'].sum())
 
 
 # ======================== API Routes ========================
@@ -1451,11 +1485,12 @@ def get_trading_stats():
         return jsonify({"status": "empty", "message": "No trade data yet"}), 200
 
     df = slice_by_period(df_all, period)
-    total_pnl = df['net_realized_pnl'].sum()
 
-    # Trade statistics are per closed position (net of every fill's fees)
+    # Every figure is per closed position (net of every fill's fees), the same basis as Performance
     cp     = closed_positions(period)
     n_pos  = len(cp)
+    total_pnl   = float(cp['net_pnl'].sum()) if n_pos else 0.0
+    partial_pnl = partial_exit_pnl(df, cp)
     won    = cp[cp['is_win']] if n_pos else cp
     lost   = cp[~cp['is_win']] if n_pos else cp
     wins, losses = len(won), len(lost)
@@ -1484,8 +1519,8 @@ def get_trading_stats():
 
     # Last-7-days bar chart (today as anchor, 7 days back)
     today         = now_et().normalize()
-    df['_date']   = df['create_time'].dt.strftime('%Y-%m-%d')
-    daily_pnl_map = df.groupby('_date')['net_realized_pnl'].sum().to_dict()
+    daily_pnl_map = (cp.groupby(cp['close_time'].dt.strftime('%Y-%m-%d'))['net_pnl'].sum().to_dict()
+                     if n_pos else {})
 
     last_7_chart = []
     for i in range(6, -1, -1):
@@ -1503,11 +1538,11 @@ def get_trading_stats():
     latest_trades = [build_trade_card(row, df_all) for _, row in closed.head(3).iterrows()]
 
     # Cumulative profit chart
-    df_sorted = df.sort_values('create_time').copy()
-    df_sorted['_date_only'] = df_sorted['create_time'].dt.date
-    daily_sum  = df_sorted.groupby('_date_only')['net_realized_pnl'].sum().reset_index()
+    daily_sum = (cp.assign(_date_only=cp['close_time'].dt.date)
+                   .groupby('_date_only')['net_pnl'].sum().reset_index()
+                 if n_pos else pd.DataFrame(columns=['_date_only', 'net_pnl']))
     daily_sum['_date_str'] = pd.to_datetime(daily_sum['_date_only']).dt.strftime('%b %d, %Y')
-    daily_sum['_cum']      = daily_sum['net_realized_pnl'].cumsum()
+    daily_sum['_cum']      = daily_sum['net_pnl'].cumsum()
 
     if not daily_sum.empty:
         first_date_str = pd.to_datetime(
@@ -1525,6 +1560,7 @@ def get_trading_stats():
         "status": "success",
         "summary": {
             "total_pnl":           round(total_pnl, 2),
+            "partial_pnl":         round(partial_pnl, 2),
             "win_rate":            win_rate_str,
             "win_split":           win_loss_split,
             "avg_gain_usd":        round(avg_gain_usd, 2),
@@ -1720,7 +1756,9 @@ def get_performance():
     profit_factor  = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 999.0
     win_loss_ratio = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0.0
     expectancy     = round(float(cp['net_pnl'].mean()), 2) if n_pos else 0.0
-    total_pnl      = float(df['net_realized_pnl'].sum())
+    # Every P&L figure on this page counts positions closed in the period, net of all their fees.
+    total_pnl      = float(cp['net_pnl'].sum()) if n_pos else 0.0
+    partial_pnl    = partial_exit_pnl(df, cp)
 
     # ── Streaks (positions in close order) ────────────────────────
     cur_win_streak = cur_loss_streak = max_win_streak = max_loss_streak = 0
@@ -1734,20 +1772,19 @@ def get_performance():
     current_streak_type  = 'W' if cur_win_streak > 0 else 'L'
     current_streak_count = cur_win_streak if cur_win_streak > 0 else cur_loss_streak
 
-    # ── Monthly bar chart (realized P&L by month) ────────────────
-    df['_month_key'] = df['create_time'].dt.strftime('%Y-%m')
-    df['_month_lbl'] = df['create_time'].dt.strftime('%b %Y')
-    monthly_grp = df.groupby(['_month_key', '_month_lbl'])['net_realized_pnl'].sum().reset_index()
-    monthly_bars = [
-        {"label": str(r['_month_lbl']), "value": round(float(r['net_realized_pnl']), 2),
-         "isProfit": bool(r['net_realized_pnl'] >= 0)}
-        for _, r in monthly_grp.sort_values('_month_key').iterrows()
-    ]
+    # ── Monthly bar chart (closed-position P&L by close month) ────
+    monthly_bars = []
+    if n_pos:
+        by_month = cp.groupby(cp['close_time'].dt.to_period('M'))['net_pnl'].sum().sort_index()
+        monthly_bars = [
+            {"label": m.strftime('%b %Y'), "value": round(float(v), 2), "isProfit": bool(v >= 0)}
+            for m, v in by_month.items()
+        ]
 
     # ── Day-of-week distribution (by close day) ───────────────────
     dow_stats = []
     for i, lbl in enumerate(['Mon', 'Tue', 'Wed', 'Thu', 'Fri']):
-        grp = cp[cp['close_time'].dt.dayofweek == i] if n_pos else cp
+        grp = cp[trading_weekday(cp['close_time']) == i] if n_pos else cp
         day_pnl = float(grp['net_pnl'].sum()) if len(grp) else 0.0
         dow_stats.append({
             "label":    lbl,
@@ -1758,7 +1795,7 @@ def get_performance():
         })
 
     # ── Risk ratios on the daily P&L series (scale-free, so no account size needed) ──
-    daily = daily_pnl_series(df)
+    daily = daily_pnl_series(cp)
     if len(daily) >= 2 and daily.std() > 0:
         sharpe_ratio = round(float(daily.mean() / daily.std()) * (252 ** 0.5), 2)
         downside_dev = float(((daily.clip(upper=0)) ** 2).mean() ** 0.5)
@@ -1787,6 +1824,7 @@ def get_performance():
         "status": "success",
         "summary": {
             "total_pnl":           round(total_pnl, 2),
+            "partial_pnl":         round(partial_pnl, 2),
             "trade_count":         n_pos,
             "win_rate":            f"{int(win_rate * 100)}%",
             "profit_factor":       profit_factor,
