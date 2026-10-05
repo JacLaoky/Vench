@@ -13,6 +13,9 @@ interface Summary {
   sell_count: number
   win_rate: string
   avg_gain_usd: number
+  avg_loss_usd: number   // absolute value
+  wins: number
+  losses: number
   avg_gain_pct: string
   profit_factor: string
   total_pnl: number
@@ -80,10 +83,12 @@ export default function Stats() {
       </div>
 
       {/* KPI row */}
-      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-6">
+      <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-6 gap-3 mb-6">
         <StatBox label="Closed Trades" value={String(s.sell_count)} sub="entry to flat = 1 trade" />
-        <StatBox label="Win Rate" value={s.win_rate} color={s.sell_count ? (winPct >= 50 ? 'text-emerald-400' : 'text-red-400') : 'text-slate-500'} sub="closed positions" />
-        <StatBox label="Avg Gain" value={usd(s.avg_gain_usd)} color="text-emerald-400" />
+        <StatBox label="Win Rate" value={s.win_rate} color={s.sell_count ? (winPct >= 50 ? 'text-emerald-400' : 'text-red-400') : 'text-slate-500'}
+          sub={s.sell_count ? `${s.wins}W / ${s.losses}L · ${s.sell_count} closed` : 'no position closed'} />
+        <StatBox label="Avg Gain" value={s.wins ? usd(s.avg_gain_usd) : '—'} color={s.wins ? 'text-emerald-400' : 'text-slate-500'} sub="per winning position" />
+        <StatBox label="Avg Loss" value={s.losses ? `-${usd(s.avg_loss_usd)}` : '—'} color={s.losses ? 'text-red-400' : 'text-slate-500'} sub="per losing position" />
         <StatBox label="Profit Factor" value={s.profit_factor} color={s.profit_factor === '—' ? 'text-slate-500' : s.profit_factor === '∞' || parseFloat(s.profit_factor) >= 1 ? 'text-emerald-400' : 'text-red-400'} />
         <StatBox label="Total P&L" value={signedUsd(s.total_pnl)} color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
           sub="realized, incl. partial exits" />
