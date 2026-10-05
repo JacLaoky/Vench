@@ -235,6 +235,18 @@ def init_db():
             updated_at   TEXT NOT NULL
         )
     ''')
+    _add_column_if_missing(conn, 'position_stops', 'initial_stop', 'REAL')
+
+    # Entry stops the trading system recorded when it opened a right-side trade (mirrored with the
+    # R ledger, see refresh_r_ledger); apply_entry_stops attaches them to positions by entry order
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS entry_stops (
+            decision_id  INTEGER PRIMARY KEY,
+            order_id     TEXT NOT NULL,
+            symbol       TEXT NOT NULL,
+            stop_loss    REAL NOT NULL
+        )
+    ''')
 
     # Standardised R comes only from the live trading system's R ledger (one fixed 1R unit per
     # trade, see refresh_r_ledger); this table mirrors it, keyed by the shared position id
@@ -611,6 +623,25 @@ _r_ledger_status  = {'ok': None, 'message': 'not fetched yet', 'fetched_at': Non
 _r_ledger_last_try = 0.0
 
 
+def apply_entry_stops(conn: sqlite3.Connection) -> int:
+    """Attach the trading system's entry stop to each position it opened (matched by entry order).
+    initial_stop always follows the trading system; the current stop is only filled in when the
+    journal has none, so a stop edited by hand is never overwritten. Returns positions matched."""
+    first = {}
+    for pid, sym, stop in conn.execute(
+        'SELECT t.position_id, e.symbol, e.stop_loss FROM entry_stops e '
+        'JOIN trades t ON t.order_id = e.order_id WHERE t.position_id IS NOT NULL ORDER BY e.decision_id'
+    ):
+        first.setdefault(pid, (sym, stop))   # a scale-in keeps the stop of the opening order
+    now = datetime.now().isoformat()
+    conn.executemany(
+        'INSERT INTO position_stops (position_id, ticker, stop_price, updated_at, initial_stop) '
+        'VALUES (?, ?, ?, ?, ?) ON CONFLICT(position_id) DO UPDATE SET initial_stop = excluded.initial_stop',
+        [(pid, sym, stop, now, stop) for pid, (sym, stop) in first.items()],
+    )
+    return len(first)
+
+
 def refresh_r_ledger(force: bool = False) -> None:
     """Replace the local r_ledger mirror with the trading server's ledger. On failure the last
     good copy is kept and the error is reported through r_ledger_status."""
@@ -630,7 +661,8 @@ def refresh_r_ledger(force: bool = False) -> None:
             out = subprocess.run(cmd + [R_LEDGER_SSH], capture_output=True, text=True, timeout=30)
             if out.returncode != 0:
                 raise RuntimeError(out.stderr.strip()[-300:] or f'ssh exited {out.returncode}')
-            ledger_csv, _, pool_json = out.stdout.partition('\n#POOL\n')
+            ledger_csv, _, rest = out.stdout.partition('\n#POOL\n')
+            pool_json, has_stops, stops_tsv = rest.partition('\n#STOPS\n')
             rows = list(csv.DictReader(io.StringIO(ledger_csv)))
             if not ledger_csv.startswith('close_date') or (rows and 'position_id' not in rows[0]):
                 raise RuntimeError('unexpected ledger format')
@@ -657,6 +689,14 @@ def refresh_r_ledger(force: bool = False) -> None:
                         'INSERT INTO swing_pool_flows (date, amount, note) VALUES (?, ?, ?)',
                         [(f['date'], float(f['amount']), f.get('note', '')) for f in pool.get('flows', [])],
                     )
+                if has_stops:
+                    stops = [line.split('\t') for line in stops_tsv.splitlines() if line.strip()]
+                    conn.execute('DELETE FROM entry_stops')
+                    conn.executemany(
+                        'INSERT INTO entry_stops (decision_id, order_id, symbol, stop_loss) VALUES (?, ?, ?, ?)',
+                        [(int(d), oid, sym.upper(), float(stop)) for d, oid, sym, stop in stops],
+                    )
+                    apply_entry_stops(conn)
             conn.close()
             _positions_cache = None
             _card_ctx = None
@@ -1221,6 +1261,11 @@ def trigger_sync():
         _last_sync_time = time.time()
         refresh_r_ledger(force=True)
         assign_position_ids()
+        conn = sqlite3.connect(DB_FILE)
+        with conn:
+            apply_entry_stops(conn)
+        conn.close()
+        invalidate_cache()
         _write_position_pnl()
         if DEEPSEEK_API_KEY:
             import rag
