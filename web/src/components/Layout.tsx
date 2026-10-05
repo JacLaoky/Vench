@@ -5,6 +5,7 @@ import {
   Calendar, Activity, List, Calculator, RefreshCw, Waves, Menu, X, Tags, RotateCw, Table2,
 } from 'lucide-react'
 import { api } from '../api'
+import { useBuildCheck } from '../lib/useBuildCheck'
 
 const groups = [
   { title: 'Overview', items: [
@@ -104,6 +105,7 @@ function NavLinks({ onNavigate }: { onNavigate?: () => void }) {
 export default function Layout({ children }: { children: React.ReactNode }) {
   const [menuOpen, setMenuOpen] = useState(false)
   const { pathname } = useLocation()
+  useBuildCheck()
   const current = allItems.find(n => (n.to === '/' ? pathname === '/' : pathname.startsWith(n.to)))
 
   return (
