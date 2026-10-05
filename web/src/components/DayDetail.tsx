@@ -40,7 +40,9 @@ export default function DayDetail({ date, day, note, onNoteSaved, onTradeUpdate,
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="bg-white/[0.03] border border-line rounded-lg py-2">
                 <p className="text-[11px] text-slate-500">Closed P&amp;L (net)</p>
-                <p className={`text-sm font-semibold ${pnlColor(day.pnl_value)}`}>{signedUsd(day.pnl_value)}</p>
+                {day.closed
+                  ? <p className={`text-sm font-semibold ${pnlColor(day.pnl_value)}`}>{signedUsd(day.pnl_value)}</p>
+                  : <p className="text-sm text-slate-500">—</p>}
               </div>
               <div className="bg-white/[0.03] border border-line rounded-lg py-2">
                 <p className="text-[11px] text-slate-500">Won / Lost</p>

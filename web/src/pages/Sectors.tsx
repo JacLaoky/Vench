@@ -4,18 +4,20 @@ import { useApi } from '../lib/useApi'
 import { usePersistentState } from '../lib/usePersistentState'
 import SectorDrawer from '../components/SectorDrawer'
 import { EmptyState, ErrorState, Loading } from '../components/PageState'
+import { usd } from '../lib/format'
 
 interface SectorItem {
   ticker: string; name: string; change_pct: number; price: number
 }
 
-function heatColor(pct: number): string {
-  if (pct >= 3)  return 'bg-emerald-500/40 border-emerald-500/50 text-emerald-300'
-  if (pct >= 1)  return 'bg-emerald-600/20 border-emerald-600/30 text-emerald-400'
-  if (pct >= 0)  return 'bg-emerald-900/20 border-emerald-900/30 text-emerald-600'
-  if (pct >= -1) return 'bg-red-900/20 border-red-900/30 text-red-500'
-  if (pct >= -3) return 'bg-red-600/20 border-red-600/30 text-red-400'
-  return 'bg-red-500/40 border-red-500/50 text-red-300'
+/** Tint strength shows the size of the move; the text stays bright enough to read on every tint. */
+function heatColor(pct: number): { box: string; value: string } {
+  if (pct >= 3)  return { box: 'bg-emerald-500/25 border-emerald-400/40', value: 'text-emerald-300' }
+  if (pct >= 1)  return { box: 'bg-emerald-500/[0.13] border-emerald-500/25', value: 'text-emerald-300' }
+  if (pct >= 0)  return { box: 'bg-emerald-500/[0.06] border-emerald-500/15', value: 'text-emerald-400' }
+  if (pct >= -1) return { box: 'bg-red-500/[0.06] border-red-500/15', value: 'text-red-400' }
+  if (pct >= -3) return { box: 'bg-red-500/[0.13] border-red-500/25', value: 'text-red-300' }
+  return { box: 'bg-red-500/25 border-red-400/40', value: 'text-red-300' }
 }
 
 const PERIODS = ['1D', '1W', '1M'] as const
@@ -81,17 +83,20 @@ export default function Sectors() {
         <EmptyState title="No market data available" />
       ) : (
         <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
-          {sorted.map(item => (
-            <button key={item.ticker} onClick={() => setOpen(item)}
-              className={`text-left rounded-xl border p-4 transition hover:brightness-125 ${heatColor(item.change_pct)}`}>
-              <div className="flex justify-between items-start mb-2 gap-2">
-                <span className="font-medium text-sm">{item.name}</span>
-                <span className="font-mono text-xs opacity-60">{item.ticker}</span>
-              </div>
-              <p className="text-2xl font-bold">{item.change_pct > 0 ? '+' : ''}{item.change_pct.toFixed(2)}%</p>
-              <p className="text-xs opacity-60 mt-1">${item.price.toFixed(2)}</p>
-            </button>
-          ))}
+          {sorted.map(item => {
+            const heat = heatColor(item.change_pct)
+            return (
+              <button key={item.ticker} onClick={() => setOpen(item)}
+                className={`text-left rounded-xl border p-4 transition hover:brightness-125 ${heat.box}`}>
+                <div className="flex justify-between items-start mb-2 gap-2">
+                  <span className="font-medium text-sm text-slate-100">{item.name}</span>
+                  <span className="font-mono text-xs text-slate-400">{item.ticker}</span>
+                </div>
+                <p className={`text-xl sm:text-2xl font-semibold tracking-tight ${heat.value}`}>{item.change_pct > 0 ? '+' : ''}{item.change_pct.toFixed(2)}%</p>
+                <p className="text-xs text-slate-400 mt-1">{usd(item.price)}</p>
+              </button>
+            )
+          })}
         </div>
       )}
 

@@ -91,7 +91,7 @@ export default function Dashboard() {
                         {p.pl_val >= 0 ? <TrendingUp size={12} /> : <TrendingDown size={12} />}
                         {signedUsd(p.pl_val)}
                       </div>
-                      <div className="text-xs opacity-70">{pct(p.pl_ratio)}</div>
+                      <div className="text-xs opacity-90">{pct(p.pl_ratio)}</div>
                     </td>
                     <td className={`text-right px-4 py-3 text-xs hidden md:table-cell ${pnlColor(p.today_pl_val)}`}>
                       {signedUsd(p.today_pl_val)}

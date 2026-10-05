@@ -30,9 +30,11 @@
   /* neutral text greys with a hint of blue */
   --color-slate-200: #e3e6ee;
   --color-slate-300: #c3c8d4;
-  --color-slate-400: #959cad;
-  --color-slate-500: #6d7486;
-  --color-slate-600: #4b5162;
+  --color-slate-400: #aab0bf;
+  --color-slate-500: #9097a8;
+  --color-slate-600: #7e8597;
+  --color-emerald-600: #0e7f5b;
+  --color-red-600: #c93f3f;
 
   --shadow-card: 0 1px 0 0 rgb(255 255 255 / 0.03) inset, 0 8px 24px -12px rgb(0 0 0 / 0.6);
 }

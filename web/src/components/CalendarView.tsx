@@ -2,8 +2,12 @@ import { useMemo } from 'react'
 import { pnlColor, signedUsd } from '../lib/format'
 import type { JournalDay } from '../types'
 
-const PROFIT = ['#064e3b', '#047857', '#059669', '#10b981', '#3fd49a']
-const LOSS   = ['#7f1d1d', '#991b1b', '#b91c1c', '#dc2626', '#f47a7a']
+// Five shades per sign; the two brightest carry dark ink so the numbers stay readable (WCAG AA).
+const PROFIT = ['#064e3b', '#065f46', '#047857', '#2fbf8a', '#5fe0ae']
+const LOSS   = ['#7f1d1d', '#991b1b', '#b91c1c', '#e05252', '#f58b8b']
+const PROFIT_INK = ['#ffffff', '#ffffff', '#ffffff', '#04261a', '#04261a']
+const LOSS_INK   = ['#ffffff', '#ffffff', '#ffffff', '#2f0909', '#2f0909']
+type Shade = { bg: string; ink: string }
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 const iso = (d: Date) =>
@@ -18,14 +22,17 @@ function useShader(days: JournalDay[]) {
       const rank = sorted.findIndex(x => x >= v)
       return Math.min(4, Math.floor(((rank < 0 ? sorted.length - 1 : rank) / Math.max(1, sorted.length)) * 5))
     }
-    return (pnl: number) =>
-      pnl > 0 ? PROFIT[level(wins, pnl)] : pnl < 0 ? LOSS[level(losses, -pnl)] : undefined
+    return (pnl: number): Shade | undefined => {
+      if (pnl > 0) { const l = level(wins, pnl); return { bg: PROFIT[l], ink: PROFIT_INK[l] } }
+      if (pnl < 0) { const l = level(losses, -pnl); return { bg: LOSS[l], ink: LOSS_INK[l] } }
+      return undefined
+    }
   }, [days])
 }
 
 function YearHeatmap({ byDate, shade, onSelect }: {
   byDate: Map<string, JournalDay>
-  shade: (pnl: number) => string | undefined
+  shade: (pnl: number) => Shade | undefined
   onSelect: (date: string) => void
 }) {
   const end = new Date()
@@ -48,7 +55,7 @@ function YearHeatmap({ byDate, shade, onSelect }: {
               return (
                 <button key={key} onClick={() => onSelect(key)} title={day ? `${key}  ${signedUsd(day.pnl_value)}` : key}
                   className="w-3 h-3 rounded-[2px] bg-white/5 hover:ring-1 hover:ring-white/40"
-                  style={day ? { background: shade(day.pnl_value) ?? 'rgba(255,255,255,0.15)' } : undefined} />
+                  style={day ? { background: shade(day.pnl_value)?.bg ?? 'rgba(255,255,255,0.15)' } : undefined} />
               )
             })}
           </div>
@@ -102,14 +109,14 @@ export default function CalendarView({ days, notes, onSelect }: {
                 {Array.from({ length: daysInMonth }, (_, i) => {
                   const date = `${key}-${String(i + 1).padStart(2, '0')}`
                   const day = byDate.get(date)
-                  const bg = day ? shade(day.pnl_value) : undefined
+                  const sh = day ? shade(day.pnl_value) : undefined
                   return (
                     <button key={date} onClick={() => onSelect(date)}
                       className={`relative aspect-square sm:aspect-auto sm:h-14 rounded-md text-left p-1 transition hover:ring-1 hover:ring-white/30 ${day ? '' : 'bg-white/[0.03]'}`}
-                      style={bg ? { background: bg } : day ? { background: 'rgba(255,255,255,0.08)' } : undefined}>
-                      <span className={`block text-[10px] ${day ? 'text-white/90' : 'text-slate-600'}`}>{i + 1}</span>
+                      style={sh ? { background: sh.bg, color: sh.ink } : day ? { background: 'rgba(255,255,255,0.08)', color: '#e3e6ee' } : undefined}>
+                      <span className={`block text-[10px] ${day ? '' : 'text-slate-600'}`}>{i + 1}</span>
                       {day && day.pnl_value !== 0 && (
-                        <span className="hidden sm:block text-[10px] font-medium text-white truncate">
+                        <span className="hidden sm:block text-[10px] font-semibold truncate">
                           {day.pnl_value > 0 ? '+' : '-'}{Math.abs(day.pnl_value) >= 1000 ? `${(Math.abs(day.pnl_value) / 1000).toFixed(1)}k` : Math.round(Math.abs(day.pnl_value))}
                         </span>
                       )}

@@ -50,7 +50,9 @@ function DayCard({ day, note, onOpen }: { day: JournalDay; note: string; onOpen:
             {day.partial_value !== 0 && <> · partials <span className={pnlColor(day.partial_value)}>{signedUsd(day.partial_value)}</span></>}
           </p>
         </div>
-        <span className={`text-base font-semibold ${pnlColor(day.pnl_value)}`}>{signedUsd(day.pnl_value)}</span>
+        {day.closed
+          ? <span className={`text-base font-semibold ${pnlColor(day.pnl_value)}`}>{signedUsd(day.pnl_value)}</span>
+          : <span className="text-base text-slate-500" title="No position closed this day">—</span>}
       </div>
       <div className="flex gap-1 flex-wrap mt-2">
         {day.tickers.map(t => (
@@ -187,11 +189,11 @@ export default function Journal() {
       {view === 'months' && (
         <div>
           <div className="card p-4 mb-4">
-            <h2 className="text-sm font-semibold text-slate-100 mb-4">Realized P&L by month</h2>
+            <h2 className="text-sm font-medium text-white mb-4">Realized P&L by month</h2>
             <ResponsiveContainer width="100%" height={180}>
               <BarChart data={monthBars}>
-                <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#6d7486' }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize: 11, fill: '#6d7486' }} axisLine={false} tickLine={false} width={44} />
+                <XAxis dataKey="label" tick={{ fontSize: 11, fill: '#9097a8' }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize: 11, fill: '#9097a8' }} axisLine={false} tickLine={false} width={44} />
                 <Tooltip content={<Tip />} cursor={{ fill: 'rgba(255,255,255,0.04)' }} />
                 <ReferenceLine y={0} stroke="rgba(255,255,255,0.1)" />
                 <Bar dataKey="value" radius={[4, 4, 0, 0]}>

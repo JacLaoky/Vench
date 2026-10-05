@@ -130,7 +130,7 @@ export default function AllTrades() {
                   <td className="text-right px-4 py-2.5 text-slate-400 hidden md:table-cell">{t.qty}</td>
                   <td className={`text-right px-4 py-2.5 font-medium ${pnlColor(net(t))}`}>
                     {signedUsd(net(t))}
-                    <span className="block text-[11px] opacity-70">{t.pct}</span>
+                    <span className="block text-[11px] opacity-90">{t.pct}</span>
                   </td>
                   <td className={`text-right px-4 py-2.5 font-medium ${rColor(t.r_multiple)}`}>{fmtR(t.r_multiple)}</td>
                   <td className="text-right px-4 py-2.5 text-slate-500 text-xs hidden sm:table-cell">{t.holding_time}</td>
