@@ -46,13 +46,12 @@ function DayCard({ day, note, onOpen }: { day: JournalDay; note: string; onOpen:
         <div>
           <p className="text-sm font-medium text-white">{shortDate(day.date)}</p>
           <p className="text-xs text-slate-500 mt-0.5">
-            {day.trades} fills{day.closed ? ` · ${day.wins}W ${day.losses}L · ${day.winPct}` : ''} · fees {usd(day.comm_value)}
-            {day.partial_value !== 0 && <> · partials <span className={pnlColor(day.partial_value)}>{signedUsd(day.partial_value)}</span></>}
+            {day.trades} fills · {day.closed} closed · {day.winPct} win · fees {usd(day.comm_value)}
           </p>
         </div>
-        {day.closed
+        {day.exits
           ? <span className={`text-base font-semibold ${pnlColor(day.pnl_value)}`}>{signedUsd(day.pnl_value)}</span>
-          : <span className="text-base text-slate-500" title="No position closed this day">—</span>}
+          : <span className="text-base text-slate-500" title="No sells this day">—</span>}
       </div>
       <div className="flex gap-1 flex-wrap mt-2">
         {day.tickers.map(t => (
@@ -77,7 +76,7 @@ function MonthCard({ month, onOpen }: { month: JournalMonth; onOpen: () => void 
         <div>
           <p className="text-sm font-medium text-white">{month.monthYear}</p>
           <p className="text-xs text-slate-500 mt-0.5">
-            {month.closed} closed{month.win_rate !== null ? ` · ${Math.round(month.win_rate * 100)}% win` : ''} · avg win {month.avgGain}
+            {month.closed} closed · {month.win_rate !== null ? `${Math.round(month.win_rate * 100)}%` : '—'} win · avg win {month.avgGain}
           </p>
         </div>
         <span className={`text-base font-semibold ${pnlColor(month.profit_value)}`}>{signedUsd(month.profit_value)}</span>

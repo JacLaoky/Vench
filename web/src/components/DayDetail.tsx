@@ -26,7 +26,7 @@ export default function DayDetail({ date, day, note, onNoteSaved, onTradeUpdate,
 
   return (
     <Drawer title={fullDate(date)} onClose={onClose} wide
-      subtitle={day ? `${day.trades} fills · ${day.closed} positions closed · commission ${usd(day.comm_value)}` : 'No fills this day'}>
+      subtitle={day ? `${day.trades} fills · ${day.exits} exits · ${day.closed} positions closed · commission ${usd(day.comm_value)}` : 'No fills this day'}>
       {openTrade ? (
         <>
           <button onClick={() => setOpenTradeId(null)} className="flex items-center gap-1 text-sm text-slate-400 hover:text-white mb-4">
@@ -39,24 +39,19 @@ export default function DayDetail({ date, day, note, onNoteSaved, onTradeUpdate,
           {day && (
             <div className="grid grid-cols-3 gap-2 text-center">
               <div className="bg-white/[0.03] border border-line rounded-lg py-2">
-                <p className="text-[11px] text-slate-500">Closed P&amp;L (net)</p>
-                {day.closed
+                <p className="text-[11px] text-slate-500">Realized P&amp;L (net)</p>
+                {day.exits
                   ? <p className={`text-sm font-semibold ${pnlColor(day.pnl_value)}`}>{signedUsd(day.pnl_value)}</p>
                   : <p className="text-sm text-slate-500">—</p>}
               </div>
               <div className="bg-white/[0.03] border border-line rounded-lg py-2">
-                <p className="text-[11px] text-slate-500">Won / Lost</p>
+                <p className="text-[11px] text-slate-500">Closed W / L</p>
                 <p className="text-sm font-semibold text-white">{day.wins} / {day.losses}</p>
               </div>
               <div className="bg-white/[0.03] border border-line rounded-lg py-2">
                 <p className="text-[11px] text-slate-500">Win rate</p>
-                <p className="text-sm font-semibold text-white">{day.closed ? day.winPct : '—'}</p>
+                <p className="text-sm font-semibold text-white">{day.winPct}</p>
               </div>
-              {day.partial_value !== 0 && (
-                <p className="col-span-3 text-[11px] text-slate-500 text-left">
-                  Partial exits from positions still open: <span className={pnlColor(day.partial_value)}>{signedUsd(day.partial_value)}</span> (counted on the day the position closes)
-                </p>
-              )}
             </div>
           )}
 

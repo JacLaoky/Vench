@@ -92,15 +92,13 @@ export default function CalendarView({ days, notes, onSelect }: {
           const pnl = monthDays.reduce((s, d) => s + d.pnl_value, 0)
           const closed = monthDays.reduce((s, d) => s + d.closed, 0)
           const wins = monthDays.reduce((s, d) => s + Number(d.wins), 0)
-          const partial = monthDays.reduce((s, d) => s + (d.partial_value ?? 0), 0)
           return (
             <div key={key} className="card p-3 sm:p-4">
               <div className="flex items-baseline justify-between mb-3 gap-2 flex-wrap">
                 <h3 className="text-sm font-medium text-white">{first.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}</h3>
                 <span className="text-xs text-slate-500">
-                  {closed} closed{closed ? ` · ${Math.round((wins / closed) * 100)}% win` : ''} ·{' '}
                   <span className={pnlColor(pnl)}>{signedUsd(pnl)}</span>
-                  {Math.abs(partial) >= 0.005 && <span className="text-slate-600"> · partials {signedUsd(partial)}</span>}
+                  {` · ${closed} closed · ${closed ? `${Math.round((wins / closed) * 100)}%` : '—'} win`}
                 </span>
               </div>
               <div className="grid grid-cols-7 gap-1 text-center">
@@ -129,7 +127,7 @@ export default function CalendarView({ days, notes, onSelect }: {
           )
         })}
       </div>
-      <p className="text-[11px] text-slate-600 mt-3">Day P&amp;L and win rate count positions closed that day, net of all their fees; a partial sell is counted when its position closes. Shading ranks each day against your other winning or losing days. A dot marks a day note.</p>
+      <p className="text-[11px] text-slate-600 mt-3">Day P&amp;L is realized P&amp;L: every sell that day, partial or full, net of fees. Win rate counts only positions that went flat (entry to flat = one trade); with none closed it shows —. Shading ranks each day against your other winning or losing days. A dot marks a day note.</p>
     </div>
   )
 }

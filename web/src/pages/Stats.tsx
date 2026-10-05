@@ -16,7 +16,6 @@ interface Summary {
   avg_gain_pct: string
   profit_factor: string
   total_pnl: number
-  partial_pnl: number
   profit_chart: Array<{ date: string; value: number }>
 }
 
@@ -82,12 +81,12 @@ export default function Stats() {
 
       {/* KPI row */}
       <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mb-6">
-        <StatBox label="Total Trades" value={String(s.sell_count)} />
-        <StatBox label="Win Rate" value={s.win_rate} color={winPct >= 50 ? 'text-emerald-400' : 'text-red-400'} />
+        <StatBox label="Closed Trades" value={String(s.sell_count)} sub="entry to flat = 1 trade" />
+        <StatBox label="Win Rate" value={s.win_rate} color={s.sell_count ? (winPct >= 50 ? 'text-emerald-400' : 'text-red-400') : 'text-slate-500'} sub="closed positions" />
         <StatBox label="Avg Gain" value={usd(s.avg_gain_usd)} color="text-emerald-400" />
-        <StatBox label="Profit Factor" value={s.profit_factor} color={parseFloat(s.profit_factor) >= 1 ? 'text-emerald-400' : 'text-red-400'} />
+        <StatBox label="Profit Factor" value={s.profit_factor} color={s.profit_factor === '—' ? 'text-slate-500' : s.profit_factor === '∞' || parseFloat(s.profit_factor) >= 1 ? 'text-emerald-400' : 'text-red-400'} />
         <StatBox label="Total P&L" value={signedUsd(s.total_pnl)} color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
-          sub={`closed positions${s.partial_pnl ? ` · partials ${signedUsd(s.partial_pnl)}` : ''}`} />
+          sub="realized, incl. partial exits" />
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">

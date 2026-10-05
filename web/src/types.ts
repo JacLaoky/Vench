@@ -90,13 +90,13 @@ export interface TagCount { tag: string; count: number }
 export interface JournalDay {
   date: string
   weekday: string
-  pnl_value: number        // net P&L of positions that closed this day
-  partial_value: number    // net P&L of exits from positions still open after this day
+  pnl_value: number        // realized P&L of every exit this day (partials included), net of fees
   comm_value: number
-  closed: number
+  exits: number            // sells this day (partials included): they make up pnl_value
+  closed: number           // positions that went flat this day: wins/losses/winPct count these
   wins: string
   losses: string
-  winPct: string
+  winPct: string           // "—" when no position closed
   trades: string
   tickers: { name: string; win: boolean; trades: Trade[] }[]
 }
@@ -105,7 +105,8 @@ export interface JournalMonth {
   month_key: string
   monthYear: string
   profit_value: number
-  win_rate: number | null
+  win_rate: number | null  // share of positions closed this month that won; null if none closed
+  exits: number
   closed: number
   avgGain: string
   chart_data: { date: string; value: number }[]
@@ -114,27 +115,36 @@ export interface JournalMonth {
 export interface JournalResponse { daily: JournalDay[]; monthly: JournalMonth[] }
 
 type AllWonLost = { all: string; won: string; lost: string }
-export interface SymbolPosition {
-  position_id: string
-  direction: string
-  qty: number
-  avg_entry: number
-  avg_exit: number
-  net_pnl: number
-  pct: number
-  r: number | null
-  open_time: string
-  close_time: string
-  held: string
-}
-
 export interface SymbolStat {
   symbol: string
   pnl_raw: number
   isProfit: boolean
   trades: AllWonLost
   amount: AllWonLost
-  positions: SymbolPosition[]   // the closed positions counted above, newest close first
+}
+
+/** One exit fill (partial sells included) with its realized P&L net of fees. */
+export interface RealizedExit {
+  time: string
+  direction: string
+  qty: number
+  price: number
+  avg_cost: number
+  net: number
+  pct: number
+  kind: 'close' | 'partial'
+  r: number | null
+}
+
+/** Realized P&L of one symbol over the period, with the exits behind it (newest first). */
+export interface SymbolRealized {
+  symbol: string
+  pnl_raw: number
+  isProfit: boolean
+  exits: number
+  won: number
+  lost: number
+  rows: RealizedExit[]
 }
 
 export interface DeepStats {

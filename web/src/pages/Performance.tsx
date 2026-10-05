@@ -5,26 +5,28 @@ import Drawer from '../components/Drawer'
 import { api } from '../api'
 import { useApi } from '../lib/useApi'
 import { fmtR, pnlColor, rColor, signedUsd, usd } from '../lib/format'
-import type { DeepStats, RStats, SymbolStat } from '../types'
+import type { DeepStats, RStats, SymbolRealized } from '../types'
 import {
   ComposedChart, Area, Line, BarChart, Bar, XAxis, YAxis, Tooltip,
   ResponsiveContainer, Cell, ReferenceLine
 } from 'recharts'
 
 interface Summary {
-  trade_count: number; win_rate: string; avg_win: number; avg_loss: number
-  win_loss_ratio: number; profit_factor: number; expectancy: number
+  trade_count: number; wins: number; losses: number; exits: number   // trade_count = closed positions
+  win_rate: string; avg_win: number; avg_loss: number
+  win_loss_ratio: number; profit_factor: number | null; expectancy: number | null
   max_drawdown: number; sharpe_ratio: number; sortino_ratio: number
   kelly_pct: number; current_streak: number; current_streak_type: string
-  max_win_streak: number; max_loss_streak: number; total_pnl: number; partial_pnl: number
+  max_win_streak: number; max_loss_streak: number; total_pnl: number
 }
 interface PerfData {
   summary: Summary
   r_stats: RStats
   monthly_bars: { label: string; value: number; isProfit: boolean }[]
-  dow_stats: { label: string; pnl: number; trades: number; win_rate: number; isProfit: boolean }[]
+  dow_stats: { label: string; pnl: number; trades: number; win_rate: number | null; isProfit: boolean }[]
   drawdown_curve: { date: string; drawdown: number; equity: number }[]
   deep_stats: DeepStats
+  symbols_realized: SymbolRealized[]
 }
 
 const TIMEFRAMES = ['1W', '1M', '3M', '1Y', 'YTD', 'AT'] as const
@@ -53,24 +55,22 @@ const Tip = ({ active, payload, label }: any) => {
   )
 }
 
-type SymbolSummary = SymbolStat
+type SymbolSummary = SymbolRealized
 
-/** Closed positions of one symbol in the selected period: the same set the ranking counted. */
+/** Realized P&L of one symbol in the selected period: every exit, partial sells included. */
 function SymbolPanel({ symbol, period, onClose }: { symbol: SymbolSummary; period: string; onClose: () => void }) {
-  const positions = symbol.positions ?? []
-  const won = Number(symbol.trades.won)
-  const all = Number(symbol.trades.all)
-  const winRate = all ? Math.round((won / all) * 100) : 0
-  const maxPnl = Math.max(...positions.map(p => Math.abs(p.net_pnl)), 1)
+  const rows = symbol.rows ?? []
+  const winRate = symbol.exits ? Math.round((symbol.won / symbol.exits) * 100) : 0
+  const maxPnl = Math.max(...rows.map(r => Math.abs(r.net)), 1)
 
   return (
     <Drawer title={symbol.symbol} onClose={onClose}
-      subtitle={`${all} closed position${all === 1 ? '' : 's'} · ${period === 'AT' ? 'all time' : period} · net of fees`}>
+      subtitle={`${symbol.exits} exit${symbol.exits === 1 ? '' : 's'} · ${period === 'AT' ? 'all time' : period} · realized, net of fees`}>
       <div className="grid grid-cols-3 gap-2 text-center mb-5">
         {[
-          { label: 'Total P&L', value: signedUsd(symbol.pnl_raw), color: pnlColor(symbol.pnl_raw) },
-          { label: 'Win rate', value: `${winRate}%`, color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
-          { label: 'W / L', value: `${symbol.trades.won} / ${symbol.trades.lost}`, color: 'text-white' },
+          { label: 'Realized P&L', value: signedUsd(symbol.pnl_raw), color: pnlColor(symbol.pnl_raw) },
+          { label: 'Winning exits', value: `${winRate}%`, color: winRate >= 50 ? 'text-emerald-400' : 'text-red-400' },
+          { label: 'W / L', value: `${symbol.won} / ${symbol.lost}`, color: 'text-white' },
         ].map(item => (
           <div key={item.label} className="bg-white/[0.03] border border-line rounded-lg py-2">
             <p className="text-[11px] text-slate-500">{item.label}</p>
@@ -80,29 +80,33 @@ function SymbolPanel({ symbol, period, onClose }: { symbol: SymbolSummary; perio
       </div>
 
       <div className="space-y-3">
-        {positions.map(p => (
-          <div key={p.position_id} className="card p-4">
-            <div className="flex justify-between items-start mb-2">
-              <span className={`text-xs px-1.5 py-0.5 rounded ${p.direction === 'LONG' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300'}`}>
-                {p.direction}
-              </span>
-              <span className={`font-semibold ${pnlColor(p.net_pnl)}`}>
-                {signedUsd(p.net_pnl)}
-                <span className="text-xs ml-1 opacity-90">({p.pct >= 0 ? '+' : ''}{p.pct.toFixed(1)}%)</span>
-                {p.r !== null && <span className={`text-xs ml-1.5 ${rColor(p.r)}`}>{fmtR(p.r)}</span>}
+        {rows.map((e, i) => (
+          <div key={`${e.time}-${i}`} className="card p-4">
+            <div className="flex justify-between items-start mb-2 gap-2">
+              <div className="flex items-center gap-1.5">
+                <span className={`text-xs px-1.5 py-0.5 rounded ${e.direction === 'LONG' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300'}`}>
+                  {e.direction}
+                </span>
+                <span className={`text-xs px-1.5 py-0.5 rounded ${e.kind === 'close' ? 'bg-white/[0.06] text-slate-300' : 'bg-amber-500/15 text-amber-300'}`}>
+                  {e.kind === 'close' ? 'close' : 'partial'}
+                </span>
+              </div>
+              <span className={`font-semibold ${pnlColor(e.net)}`}>
+                {signedUsd(e.net)}
+                <span className="text-xs ml-1 opacity-90">({e.pct >= 0 ? '+' : ''}{e.pct.toFixed(1)}%)</span>
+                {e.r !== null && <span className={`text-xs ml-1.5 ${rColor(e.r)}`}>{fmtR(e.r)}</span>}
               </span>
             </div>
             <div className="w-full bg-white/5 rounded-full h-1.5 mb-3 overflow-hidden">
-              <div className={`h-full rounded-full ${p.net_pnl >= 0 ? 'bg-emerald-400' : 'bg-red-400'}`}
-                style={{ width: `${Math.min(100, (Math.abs(p.net_pnl) / maxPnl) * 100)}%` }} />
+              <div className={`h-full rounded-full ${e.net >= 0 ? 'bg-emerald-400' : 'bg-red-400'}`}
+                style={{ width: `${Math.min(100, (Math.abs(e.net) / maxPnl) * 100)}%` }} />
             </div>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-slate-500">
-              <span>Avg entry <span className="text-slate-300">{usd(p.avg_entry)}</span></span>
-              <span>Avg exit <span className="text-slate-300">{usd(p.avg_exit)}</span></span>
-              <span>Qty <span className="text-slate-300">{p.qty}</span></span>
-              <span>Held <span className="text-slate-300">{p.held}</span></span>
+              <span>Avg cost <span className="text-slate-300">{usd(e.avg_cost)}</span></span>
+              <span>Exit <span className="text-slate-300">{usd(e.price)}</span></span>
+              <span>Qty <span className="text-slate-300">{e.qty}</span></span>
+              <span>Date <span className="text-slate-300">{e.time}</span></span>
             </div>
-            <p className="text-xs text-slate-600 mt-2">{p.open_time} → {p.close_time}</p>
           </div>
         ))}
       </div>
@@ -128,7 +132,7 @@ function SymbolRanking({
   return (
     <div className="card p-4">
       <div className="flex items-center justify-between mb-3">
-        <h2 className="text-sm font-medium text-white">Top Symbols</h2>
+        <h2 className="text-sm font-medium text-white">Top Symbols <span className="text-xs text-slate-500 font-normal ml-1">realized P&amp;L</span></h2>
         <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5">
           <button onClick={() => setMode('winners')}
             className={`px-2.5 py-1 rounded-md text-xs transition-colors ${mode === 'winners' ? 'bg-emerald-600 text-white' : 'text-slate-400 hover:text-white'}`}>
@@ -161,7 +165,7 @@ function SymbolRanking({
               <span className={`text-sm font-medium w-20 text-right ${s.isProfit ? 'text-emerald-400' : 'text-red-400'}`}>
                 {s.isProfit ? '+' : ''}${s.pnl_raw.toFixed(2)}
               </span>
-              <span className="text-xs text-slate-500 w-10 text-right">{s.trades.all}x</span>
+              <span className="text-xs text-slate-500 w-14 text-right" title="exits in the period">{s.exits} exit{s.exits === 1 ? '' : 's'}</span>
             </button>
           ))}
         </div>
@@ -274,15 +278,18 @@ export default function Performance() {
       {/* KPI grid */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
         <MetricCard label="Total P&L" value={signedUsd(s.total_pnl)} color={s.total_pnl >= 0 ? 'text-emerald-400' : 'text-red-400'}
-          sub={`closed positions${s.partial_pnl ? ` · partials ${signedUsd(s.partial_pnl)}` : ''}`} />
-        <MetricCard label="Win Rate" value={s.win_rate} color={winPct >= 50 ? 'text-emerald-400' : 'text-red-400'} sub={`${data.deep_stats.gain_loss.trades.won}W / ${data.deep_stats.gain_loss.trades.lost}L`} />
-        <MetricCard label="Profit Factor" value={s.profit_factor >= 999 ? '∞' : s.profit_factor.toFixed(2)} color={s.profit_factor >= 1 ? 'text-emerald-400' : 'text-red-400'} />
-        <MetricCard label="Expectancy" value={signedUsd(s.expectancy)} color={s.expectancy >= 0 ? 'text-emerald-400' : 'text-red-400'} />
+          sub="realized, incl. partial exits" />
+        <MetricCard label="Win Rate" value={s.win_rate} color={s.trade_count ? (winPct >= 50 ? 'text-emerald-400' : 'text-red-400') : 'text-slate-500'}
+          sub={s.trade_count ? `${s.wins}W / ${s.losses}L · ${s.trade_count} closed` : 'no position closed'} />
+        <MetricCard label="Profit Factor" value={s.profit_factor === null ? '—' : s.profit_factor >= 999 ? '∞' : s.profit_factor.toFixed(2)}
+          color={s.profit_factor === null ? 'text-slate-500' : s.profit_factor >= 1 ? 'text-emerald-400' : 'text-red-400'} sub="closed positions" />
+        <MetricCard label="Expectancy" value={s.expectancy === null ? '—' : signedUsd(s.expectancy)}
+          color={s.expectancy === null ? 'text-slate-500' : s.expectancy >= 0 ? 'text-emerald-400' : 'text-red-400'} sub="avg per closed position" />
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-6">
-        <MetricCard label="Avg Win" value={usd(s.avg_win)} color="text-emerald-400" sub={data.deep_stats.best_worst.largest_usd.won} />
-        <MetricCard label="Avg Loss" value={`-${usd(s.avg_loss)}`} color="text-red-400" sub={data.deep_stats.best_worst.largest_usd.lost} />
+        <MetricCard label="Avg Win" value={usd(s.avg_win)} color="text-emerald-400" sub="per winning position" />
+        <MetricCard label="Avg Loss" value={`-${usd(s.avg_loss)}`} color="text-red-400" sub="per losing position" />
         <MetricCard label="Max Drawdown" value={`-${usd(s.max_drawdown)}`} color="text-red-400" />
         <MetricCard label="Kelly %" value={`${s.kelly_pct.toFixed(1)}%`} />
       </div>
@@ -374,8 +381,8 @@ export default function Performance() {
               {data.dow_stats.map(d => (
                 <div key={d.label}>
                   <p className="text-slate-300">{d.trades} closed</p>
-                  <p className={d.trades ? (d.win_rate >= 0.5 ? 'text-emerald-400' : 'text-red-400') : 'text-slate-600'}>
-                    {d.trades ? `${Math.round(d.win_rate * 100)}% win` : '—'}
+                  <p className={d.win_rate !== null ? (d.win_rate >= 0.5 ? 'text-emerald-400' : 'text-red-400') : 'text-slate-600'}>
+                    {d.win_rate !== null ? `${Math.round(d.win_rate * 100)}% win` : '—'}
                   </p>
                 </div>
               ))}
@@ -384,8 +391,8 @@ export default function Performance() {
         )}
 
         {/* P&L by Symbol */}
-        {data.deep_stats.symbols_by_amount?.length > 0 && (
-          <SymbolRanking symbols={data.deep_stats.symbols_by_amount} onSelect={openSymbol} />
+        {data.symbols_realized?.length > 0 && (
+          <SymbolRanking symbols={data.symbols_realized} onSelect={openSymbol} />
         )}
       </div>
 

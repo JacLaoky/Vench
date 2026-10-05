@@ -31,7 +31,7 @@ export default function MonthDetail({ month, onClose }: { month: JournalMonth; o
 
   return (
     <Drawer title={month.monthYear} wide onClose={onClose}
-      subtitle={<span>Realized <span className={pnlColor(month.profit_value)}>{signedUsd(month.profit_value)}</span> · {month.closed} positions closed</span>}>
+      subtitle={<span>Realized <span className={pnlColor(month.profit_value)}>{signedUsd(month.profit_value)}</span> · {month.closed} closed · {month.win_rate !== null ? `${Math.round(month.win_rate * 100)}%` : '—'} win</span>}>
       {loading && !data ? <Loading rows={4} /> : error ? <ErrorState message={error} onRetry={reload} /> : !s ? (
         <EmptyState title="No positions closed this month" />
       ) : (
