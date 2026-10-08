@@ -71,7 +71,7 @@ export default function Dashboard() {
                   <th className="text-right px-4 py-2 hidden sm:table-cell">Mkt Val</th>
                   <th className="text-right px-4 py-2">P&L</th>
                   <th className="text-right px-4 py-2 hidden md:table-cell">Today</th>
-                  <th className="text-right px-4 py-2">Stop</th>
+                  <th className="text-right px-4 py-2">Entry stop</th>
                   <th className="w-6" />
                 </tr>
               </thead>

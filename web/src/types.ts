@@ -10,7 +10,8 @@ export interface Position {
   today_pl_val: number
   side: string
   position_id: string | null
-  stop_price: number | null
+  stop_price: number | null   // entry stop
+  stop_locked?: boolean       // recorded by the trading system, read-only
 }
 
 export interface Account {
@@ -45,7 +46,8 @@ export interface Trade {
   transactions: Transaction[]
   fee: number
   fee_details: [string, number][]
-  stop_price: number | null
+  stop_price: number | null   // entry stop
+  stop_locked?: boolean
   /** Standardised R from the trading system's R ledger; set on the final exit of ledger trades. */
   r_multiple: number | null
 }

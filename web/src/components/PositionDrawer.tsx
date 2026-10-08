@@ -50,12 +50,12 @@ export default function PositionDrawer({ position, onClose, onStopSaved }: {
 
           {position.position_id ? (
             <section>
-              <h3 className="label-caps mb-2">Stop</h3>
+              <h3 className="label-caps mb-2">Entry stop</h3>
               <StopEditor positionId={position.position_id} ticker={position.ticker}
-                stop={position.stop_price} onSaved={stop => { onStopSaved(stop); reload() }} />
+                stop={position.stop_price} locked={position.stop_locked} onSaved={stop => { onStopSaved(stop); reload() }} />
             </section>
           ) : (
-            <p className="text-xs text-slate-500">This holding has no matching fills yet — sync first to edit its stop.</p>
+            <p className="text-xs text-slate-500">This holding has no matching fills yet — sync first to see its entry stop.</p>
           )}
 
           <section>

@@ -65,9 +65,9 @@ export default function TradeDetail({ trade, onUpdate }: { trade: Trade; onUpdat
 
       {trade.position_id && (
         <section>
-          <h3 className="label-caps mb-2">Stop</h3>
+          <h3 className="label-caps mb-2">Entry stop</h3>
           <StopEditor key={trade.position_id} positionId={trade.position_id} ticker={trade.ticker}
-            stop={trade.stop_price} onSaved={stop => onUpdate({ stop_price: stop })} />
+            stop={trade.stop_price} locked={trade.stop_locked} onSaved={stop => onUpdate({ stop_price: stop })} />
         </section>
       )}
 
