@@ -5,8 +5,10 @@ import { fmtR, pnlColor, rColor, signedUsd, usd } from '../lib/format'
 import type { Position } from '../types'
 import StopEditor from './StopEditor'
 
-export default function PositionDrawer({ position, onClose, onStopSaved }: {
+export default function PositionDrawer({ position, weightPct = null, onClose, onStopSaved }: {
   position: Position
+  /** Share of total assets, % */
+  weightPct?: number | null
   onClose: () => void
   onStopSaved: (stop: number) => void
 }) {
@@ -24,6 +26,9 @@ export default function PositionDrawer({ position, onClose, onStopSaved }: {
             <p className="text-xs text-slate-500">
               {position.side} · {position.qty} shares · avg cost ${position.cost_price.toFixed(2)}
               {position.qty > 0 && <> · now ${(position.market_val / position.qty).toFixed(2)}</>}
+            </p>
+            <p className="text-xs text-slate-500">
+              Market value {usd(position.market_val)}{weightPct !== null && <> · {weightPct.toFixed(1)}% of total assets</>}
             </p>
             <p className={`text-xs ${pnlColor(position.today_pl_val)}`}>Today {signedUsd(position.today_pl_val)}</p>
           </div>
