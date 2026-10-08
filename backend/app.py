@@ -514,9 +514,11 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
 
     # Position-level facts (stops, status, R) come from the position engine
     stop_price = position_r = position_status = None
+    stop_locked = False
     p = ctx['positions'].get(position_id)
     if p is not None:
         stop_price      = None if pd.isna(p['stop_price']) else float(p['stop_price'])
+        stop_locked     = bool(p['stop_locked']) if not pd.isna(p['stop_locked']) else False
         position_status = p['status']
         position_r      = p['r_multiple']
 
@@ -543,6 +545,7 @@ def build_trade_card(row, df: pd.DataFrame) -> dict:
         "tags":         saved_tags,
         "position_id":  position_id,
         "stop_price":   stop_price,
+        "stop_locked":  stop_locked,
         "position_status": position_status,
         "r_multiple":   position_r if is_final_close and position_status == 'closed' else None,
         "price":        float(row['price']),
@@ -625,8 +628,8 @@ _r_ledger_last_try = 0.0
 
 def apply_entry_stops(conn: sqlite3.Connection) -> int:
     """Attach the trading system's entry stop to each position it opened (matched by entry order).
-    initial_stop always follows the trading system; the current stop is only filled in when the
-    journal has none, so a stop edited by hand is never overwritten. Returns positions matched."""
+    The journal keeps only entry stops (a record for R), so the trading system's value is
+    authoritative for every position it opened. Returns positions matched."""
     first = {}
     for pid, sym, stop in conn.execute(
         'SELECT t.position_id, e.symbol, e.stop_loss FROM entry_stops e '
@@ -636,7 +639,8 @@ def apply_entry_stops(conn: sqlite3.Connection) -> int:
     now = datetime.now().isoformat()
     conn.executemany(
         'INSERT INTO position_stops (position_id, ticker, stop_price, updated_at, initial_stop) '
-        'VALUES (?, ?, ?, ?, ?) ON CONFLICT(position_id) DO UPDATE SET initial_stop = excluded.initial_stop',
+        'VALUES (?, ?, ?, ?, ?) ON CONFLICT(position_id) DO UPDATE SET '
+        'stop_price = excluded.stop_price, initial_stop = excluded.initial_stop',
         [(pid, sym, stop, now, stop) for pid, (sym, stop) in first.items()],
     )
     return len(first)
@@ -748,7 +752,14 @@ def load_positions() -> pd.DataFrame:
         return pd.DataFrame()
     conn = sqlite3.connect(DB_FILE)
     resets = load_resets(conn)
-    stops = pd.read_sql_query('SELECT position_id, stop_price FROM position_stops', conn)
+    # stop_price is the position's entry stop (a record for R, not a live stop). stop_locked: the
+    # trading system recorded it (entry_stops), so it is synced from there and not editable here
+    stops = pd.read_sql_query(
+        'SELECT s.position_id, s.stop_price, EXISTS ('
+        '  SELECT 1 FROM entry_stops e JOIN trades t ON t.order_id = e.order_id'
+        '  WHERE t.position_id = s.position_id) AS stop_locked '
+        'FROM position_stops s', conn,
+    )
     ledger = pd.read_sql_query(
         'SELECT position_id, realized_r AS r_multiple, initial_1r_usd, r_source FROM r_ledger', conn
     )
@@ -1206,22 +1217,29 @@ def get_portfolio():
         if data.empty:
             return jsonify({"status": "success", "data": []}), 200
 
-        wanted = ['code', 'stock_name', 'qty', 'can_sell_qty',
-                  'cost_price', 'market_val', 'pl_val', 'pl_ratio',
+        # Moomoo's cost_price / pl_val are on the diluted cost basis: profit already taken by partial
+        # sells is folded into the cost, so pl_val = unrealized + realized (SOXL showed a negative cost
+        # and +$646 where only +$93 was still open). Show the average cost of the shares still held and
+        # the P&L still open on them; realized P&L comes from the journal's own fills.
+        wanted = ['code', 'stock_name', 'qty', 'can_sell_qty', 'cost_price', 'average_cost',
+                  'market_val', 'pl_val', 'pl_ratio', 'unrealized_pl', 'pl_ratio_avg_cost',
                   'today_pl_val', 'position_side']
         cols = [c for c in wanted if c in data.columns]
         rows = []
         for _, r in data[cols].iterrows():
             ticker = str(r.get('code', '')).replace('US.', '')
+            avg_cost   = r.get('average_cost', r.get('cost_price', 0))
+            unrealized = r.get('unrealized_pl', r.get('pl_val', 0))
+            ratio      = r.get('pl_ratio_avg_cost', r.get('pl_ratio', 0))
             rows.append({
                 'ticker':        ticker,
                 'name':          str(r.get('stock_name', ticker)),
                 'qty':           float(r.get('qty', 0)),
                 'can_sell_qty':  float(r.get('can_sell_qty', 0)),
-                'cost_price':    round(float(r.get('cost_price', 0)), 4),
+                'cost_price':    round(float(avg_cost), 4),
                 'market_val':    round(float(r.get('market_val', 0)), 2),
-                'pl_val':        round(float(r.get('pl_val', 0)), 2),
-                'pl_ratio':      round(float(r.get('pl_ratio', 0)), 4),
+                'pl_val':        round(float(unrealized), 2),
+                'pl_ratio':      round(float(ratio), 4),
                 'today_pl_val':  round(float(r.get('today_pl_val', 0)), 2),
                 'side':          str(r.get('position_side', 'LONG')),
             })
@@ -1239,6 +1257,7 @@ def get_portfolio():
                 op = open_pos.get(row['ticker'].upper())
                 row['position_id']  = op.position_id if op else None
                 row['stop_price']   = None if not op or pd.isna(op.stop_price) else float(op.stop_price)
+                row['stop_locked']  = bool(op and not pd.isna(op.stop_locked) and op.stop_locked)
 
         return jsonify({"status": "success", "data": rows}), 200
     except Exception as e:
@@ -1300,18 +1319,27 @@ def update_trade_tags(trade_id):
 
 @app.route('/api/positions/<position_id>/stop', methods=['PATCH'])
 def set_position_stop(position_id):
-    """Record the position's current stop (journal reference only; R comes from the R ledger)."""
+    """Record the entry stop of a position the trading system did not open (a manual trade).
+    Positions it opened carry the stop it recorded at entry (apply_entry_stops) and are not editable."""
     body       = request.get_json(force=True)
     stop_price = float(body.get('stop_price', 0))
     ticker     = body.get('ticker', '')
     conn = sqlite3.connect(DB_FILE)
+    locked = conn.execute(
+        'SELECT 1 FROM entry_stops e JOIN trades t ON t.order_id = e.order_id WHERE t.position_id = ?',
+        (position_id,),
+    ).fetchone()
+    if locked:
+        conn.close()
+        return jsonify({'status': 'error', 'message': 'Entry stop comes from the trading system'}), 409
     conn.execute('''
-        INSERT INTO position_stops (position_id, ticker, stop_price, updated_at)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO position_stops (position_id, ticker, stop_price, updated_at, initial_stop)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(position_id) DO UPDATE SET
-            stop_price = excluded.stop_price,
-            updated_at = excluded.updated_at
-    ''', (position_id, ticker, stop_price, datetime.now().isoformat()))
+            stop_price   = excluded.stop_price,
+            initial_stop = excluded.initial_stop,
+            updated_at   = excluded.updated_at
+    ''', (position_id, ticker, stop_price, datetime.now().isoformat(), stop_price))
     conn.commit()
     conn.close()
     invalidate_cache()
