@@ -73,6 +73,7 @@ ACCOUNT_CACHE_SECS = 60             # /api/account cache TTL
 _detail_cache: dict = {}            # sector_detail cache, keyed by ticker
 _detail_cache_time: dict = {}       # sector_detail cache write time
 DETAIL_CACHE_MAX = 200              # oldest ticker evicted beyond this (key comes from the URL)
+_detail_cache_lock = threading.Lock()  # eviction iterates the dicts other requests write to
 BREADTH_CACHE_SECS  = 120           # market breadth cache
 EARNINGS_CACHE_SECS = 3600         # earnings calendar cache (1 hour)
 _breadth_cache: dict | None = None
@@ -108,6 +109,11 @@ class _KlineRateLimiter:
             self._calls.append(_time.time())
 
 _kline_limiter = _KlineRateLimiter(max_calls=55, window_secs=30)
+
+# quote_ctx is not thread-safe and waitress serves requests on several threads: every
+# quote_ctx call in the process goes through this one lock (a per-request lock would not
+# stop two requests from calling it at the same time)
+_quote_lock = threading.Lock()
 
 # ======================== 📂 Load ETF list from etfs.json ========================
 def _load_etfs() -> tuple[dict, dict]:
@@ -566,21 +572,36 @@ _positions_cache: pd.DataFrame | None = None
 
 _card_ctx: dict | None = None
 
+# Guards building and clearing the derived caches. A build holds it until the result is stored,
+# so an invalidate that arrives mid-build waits and then clears it — without the lock the build
+# could store a result computed from the data the invalidate was meant to drop. Re-entrant:
+# _card_context builds positions and fills while holding it.
+_cache_lock = threading.RLock()
+
 
 def invalidate_cache():
     """Call after syncing data or editing stops/notes/tags to clear the derived caches."""
     global _pnl_cache, _positions_cache, _card_ctx
-    _pnl_cache = None
-    _positions_cache = None
-    _card_ctx = None
+    with _cache_lock:
+        _pnl_cache = None
+        _positions_cache = None
+        _card_ctx = None
 
 
 def _card_context() -> dict:
     """Everything build_trade_card looks up, loaded once per cache generation instead of
     ~5 queries per card (the journal renders hundreds of cards)."""
     global _card_ctx
-    if _card_ctx is not None:
+    cached = _card_ctx
+    if cached is not None:
+        return cached
+    with _cache_lock:
+        if _card_ctx is None:
+            _card_ctx = _build_card_context()
         return _card_ctx
+
+
+def _build_card_context() -> dict:
     conn = sqlite3.connect(DB_FILE)
     notes = {
         tid: (note, json.loads(paths) if paths else [])
@@ -604,7 +625,7 @@ def _card_context() -> dict:
 
     pos = load_positions()
     df = load_df_with_pnl()
-    _card_ctx = {
+    return {
         'notes': notes,
         'meta': meta,
         'last_close': last_close,
@@ -612,7 +633,6 @@ def _card_context() -> dict:
         'positions': {r['position_id']: r for r in pos.to_dict('records')} if not pos.empty else {},
         'fills': {pid: g for pid, g in df.groupby('position_id')} if not df.empty else {},
     }
-    return _card_ctx
 
 
 # ── R ledger (standardised 1R per trade, owned by the live trading system) ──────────────────
@@ -702,8 +722,9 @@ def refresh_r_ledger(force: bool = False) -> None:
                     )
                     apply_entry_stops(conn)
             conn.close()
-            _positions_cache = None
-            _card_ctx = None
+            with _cache_lock:
+                _positions_cache = None
+                _card_ctx = None
             _r_ledger_status.update(ok=True, message='ok', trades=len(rows),
                                     fetched_at=datetime.now().isoformat(timespec='seconds'))
             print(f"[r_ledger] {len(rows)} trades")
@@ -744,9 +765,19 @@ def load_positions() -> pd.DataFrame:
     """One row per position (open and closed) with net P&L, initial/current stop and R multiple."""
     global _positions_cache
     _refresh_r_ledger_in_background()
-    if _positions_cache is not None:
+    cached = _positions_cache
+    if cached is not None:
+        return cached.copy()
+    with _cache_lock:
+        if _positions_cache is None:
+            summary = _build_positions()
+            if summary.empty:
+                return summary
+            _positions_cache = summary
         return _positions_cache.copy()
 
+
+def _build_positions() -> pd.DataFrame:
     df = load_df_with_pnl()
     if df.empty:
         return pd.DataFrame()
@@ -771,8 +802,7 @@ def load_positions() -> pd.DataFrame:
     # object dtype keeps "no R" as None (a float column would carry NaN)
     summary['r_multiple'] = summary['r_multiple'].astype(object).where(summary['r_multiple'].notna(), None)
     summary['is_win'] = summary['net_pnl'] > 0
-    _positions_cache = summary
-    return summary.copy()
+    return summary
 
 
 def closed_positions(period: str = 'AT') -> pd.DataFrame:
@@ -791,27 +821,37 @@ def load_df_with_pnl() -> pd.DataFrame:
     Returns the cached copy if still valid to avoid repeated I/O.
     """
     global _pnl_cache
-    if _pnl_cache is not None:
+    cached = _pnl_cache
+    if cached is not None:
+        return cached.copy()
+    with _cache_lock:
+        if _pnl_cache is None:
+            df = _build_df_with_pnl()
+            if df.empty:
+                return df   # empty table: return early without caching
+            _pnl_cache = df   # published only once complete: readers skip the lock
+            print("♻️  PnL cache updated")
         return _pnl_cache.copy()
 
+
+def _build_df_with_pnl() -> pd.DataFrame:
     conn = sqlite3.connect(DB_FILE)
     df   = pd.read_sql_query("SELECT * FROM trades", conn)
     conn.close()
 
     if df.empty:
-        return df   # empty table: return early without caching
+        return df
 
     df['price']       = pd.to_numeric(df['price'])
     df['qty']         = pd.to_numeric(df['qty'])
     df['create_time'] = pd.to_datetime(df['create_time'], format='mixed')
 
     df['fee'] = pd.to_numeric(df['fee'], errors='coerce').fillna(0)
-    _pnl_cache = calculate_trades_pnl(df)
+    df = calculate_trades_pnl(df)
     # Net P&L per fill: realized_pnl minus this order's own fee (entry fees land on entry fills)
-    _pnl_cache['net_realized_pnl'] = _pnl_cache['realized_pnl'] - _pnl_cache['fee']
-    _pnl_cache['is_win'] = (_pnl_cache['net_realized_pnl'] > 0) & (_pnl_cache['realized_pnl'] != 0)
-    print("♻️  PnL cache updated")
-    return _pnl_cache.copy()
+    df['net_realized_pnl'] = df['realized_pnl'] - df['fee']
+    df['is_win'] = (df['net_realized_pnl'] > 0) & (df['realized_pnl'] != 0)
+    return df
 
 
 def slice_by_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
@@ -1267,6 +1307,20 @@ def get_portfolio():
 
 @app.route('/api/sync', methods=['POST'])
 def trigger_sync():
+    # The cooldown alone is check-then-act: _last_sync_time is only set once a sync finishes,
+    # so a second request during a sync would pass it and run a second sync alongside
+    if not _sync_lock.acquire(blocking=False):
+        return jsonify({"status": "busy", "message": "A sync is already running."}), 409
+    try:
+        return _run_sync()
+    finally:
+        _sync_lock.release()
+
+
+_sync_lock = threading.Lock()
+
+
+def _run_sync():
     global _last_sync_time
     import time
     elapsed = time.time() - _last_sync_time
@@ -2124,24 +2178,29 @@ def save_daily_note(date: str):
 _sessions: dict = {}          # session_id → {"history": [...], "ts": float}
 _SESSION_TTL    = 3600        # 1 hour idle timeout
 _SESSION_MAX    = 50          # oldest idle session is evicted beyond this
+# Requests run on several threads: iterating _sessions while another thread deletes from it
+# raises "dictionary changed size during iteration"
+_sessions_lock  = threading.Lock()
 
 
 def _get_history(session_id: str) -> list:
     now = _time.time()
-    # Purge expired sessions
-    for k in [k for k, v in _sessions.items() if now - v["ts"] > _SESSION_TTL]:
-        del _sessions[k]
-    while len(_sessions) >= _SESSION_MAX and session_id not in _sessions:
-        del _sessions[min(_sessions, key=lambda k: _sessions[k]["ts"])]
-    if session_id not in _sessions:
-        _sessions[session_id] = {"history": [], "ts": now}
-    _sessions[session_id]["ts"] = now
-    return _sessions[session_id]["history"]
+    with _sessions_lock:
+        # Purge expired sessions
+        for k in [k for k, v in _sessions.items() if now - v["ts"] > _SESSION_TTL]:
+            del _sessions[k]
+        while len(_sessions) >= _SESSION_MAX and session_id not in _sessions:
+            del _sessions[min(_sessions, key=lambda k: _sessions[k]["ts"])]
+        if session_id not in _sessions:
+            _sessions[session_id] = {"history": [], "ts": now}
+        _sessions[session_id]["ts"] = now
+        return list(_sessions[session_id]["history"])
 
 
 def _save_history(session_id: str, history: list):
-    if session_id in _sessions:
-        _sessions[session_id]["history"] = history[-20:]  # keep last 10 turns
+    with _sessions_lock:
+        if session_id in _sessions:
+            _sessions[session_id]["history"] = history[-20:]  # keep last 10 turns
 
 
 @app.route('/api/journal/ask', methods=['POST'])
@@ -2202,8 +2261,9 @@ def journal_clear_session():
     """Clear a session's conversation history."""
     body       = request.get_json(silent=True) or {}
     session_id = str(body.get('session_id', 'default'))
-    if session_id in _sessions:
-        _sessions[session_id]["history"] = []
+    with _sessions_lock:
+        if session_id in _sessions:
+            _sessions[session_id]["history"] = []
     return jsonify({"status": "ok"}), 200
 
 
@@ -2255,15 +2315,12 @@ def get_sectors():
         start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
 
         # ── Per-ETF fetch function ─────────────────────────────────
-        # quote_ctx is not thread-safe; serialize API calls with a lock
-        _lock = threading.Lock()
-
         def fetch_one(name_code):
             name, code = name_code
             ticker = code.split('.')[-1]
             try:
                 _kline_limiter.acquire()
-                with _lock:
+                with _quote_lock:
                     ret, kdf, _ = quote_ctx.request_history_kline(
                         code, start=start_date, end=end_date,
                         ktype=KLType.K_DAY
@@ -2344,9 +2401,11 @@ def get_sector_detail():
         return jsonify({'status': 'error', 'message': 'ticker is required'}), 400
 
     # ── Cache check ───────────────────────────────────────────────
-    if (ticker in _detail_cache
-            and _time.time() - _detail_cache_time.get(ticker, 0) < 300):
-        return jsonify(_detail_cache[ticker]), 200
+    with _detail_cache_lock:
+        cached = _detail_cache.get(ticker)
+        fresh  = cached is not None and _time.time() - _detail_cache_time.get(ticker, 0) < 300
+    if fresh:
+        return jsonify(cached), 200
 
     try:
         from datetime import datetime, timedelta
@@ -2356,12 +2415,13 @@ def get_sector_detail():
         code       = f'US.{ticker}'
 
         _kline_limiter.acquire()
-        ret, df, _ = quote_ctx.request_history_kline(
-            code,
-            start=start_date,
-            end=end_date,
-            ktype=KLType.K_DAY,
-        )
+        with _quote_lock:
+            ret, df, _ = quote_ctx.request_history_kline(
+                code,
+                start=start_date,
+                end=end_date,
+                ktype=KLType.K_DAY,
+            )
 
         if ret != RET_OK:
             return jsonify({'status': 'error', 'message': str(df)}), 500
@@ -2460,12 +2520,13 @@ def get_sector_detail():
             'closes_50d':    closes_50d,
         }
 
-        if len(_detail_cache) >= DETAIL_CACHE_MAX and ticker not in _detail_cache:
-            oldest = min(_detail_cache_time, key=_detail_cache_time.get)
-            _detail_cache.pop(oldest, None)
-            _detail_cache_time.pop(oldest, None)
-        _detail_cache[ticker]      = payload
-        _detail_cache_time[ticker] = _time.time()
+        with _detail_cache_lock:
+            if len(_detail_cache) >= DETAIL_CACHE_MAX and ticker not in _detail_cache:
+                oldest = min(_detail_cache_time, key=_detail_cache_time.get)
+                _detail_cache.pop(oldest, None)
+                _detail_cache_time.pop(oldest, None)
+            _detail_cache[ticker]      = payload
+            _detail_cache_time[ticker] = _time.time()
         return jsonify(payload), 200
 
     except Exception as e:
@@ -2508,12 +2569,10 @@ def get_market_breadth():
         # Sector ETFs for breadth — always use 1D window (5 days)
         breadth_start = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
 
-        _lock = threading.Lock()
-
         def fetch_kline(code, s_date, e_date):
             """Fetch kline and return DataFrame or None."""
             _kline_limiter.acquire()
-            with _lock:
+            with _quote_lock:
                 ret, kdf, _ = quote_ctx.request_history_kline(
                     code, start=s_date, end=e_date, ktype=KLType.K_DAY
                 )
