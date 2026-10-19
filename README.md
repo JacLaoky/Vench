@@ -21,7 +21,7 @@ Personal trading journal and analytics platform with a Flask REST API and a Reac
 - **Calculator** — scale-in position sizing and swing trade risk calculator
 - **All Trades** — searchable, filterable, sortable full trade history
 - **Earnings Calendar** — upcoming earnings for tickers in your trade history and current holdings
-- **Journal AI** — floating AI chat widget powered by a Function Calling Agent; two tools: `run_sql` for numeric queries over a read-only connection (SQLite `ticker_pnl` view + `position_pnl` table) and `search_notes` for semantic search over diary and trade notes (ChromaDB + a multilingual MiniLM model on ONNX Runtime via fastembed, loaded on demand, incremental indexing); SSE streaming with per-tab session memory (DeepSeek API)
+- **Journal AI** — floating AI chat widget powered by a Function Calling Agent; two tools: `run_sql` for numeric queries over a read-only connection (SQLite `ticker_pnl` view + `position_pnl` table) and `search_notes` for hybrid search over diary and trade notes — BM25 (Chinese character bigrams) and vector search (ChromaDB + bge-small-zh on ONNX Runtime via fastembed, loaded on demand) fused with reciprocal rank fusion, notes chunked with their date/ticker header, optional date and ticker filters, incremental indexing; retrieval eval in `backend/rag_eval/`; SSE streaming with per-tab session memory (DeepSeek API)
 
 ## Stack
 
@@ -140,7 +140,7 @@ MIT
 - **Calculator** — 分批建仓计算器和波段交易风险计算器
 - **All Trades** — 全部历史交易，支持搜索、筛选、排序
 - **Earnings Calendar** — 自动获取交易历史和当前持仓中标的的财报日期
-- **Journal AI** — 悬浮 AI 聊天窗口，Function Calling Agent 架构；两个工具：`run_sql`（只读连接查 SQLite `ticker_pnl` 视图和 `position_pnl` 表）和 `search_notes`（ChromaDB 语义搜索日记和笔记，多语言 MiniLM 模型经 fastembed 跑在 ONNX Runtime 上，按需加载、增量索引）；SSE 流式输出 + session 对话记忆（DeepSeek API）
+- **Journal AI** — 悬浮 AI 聊天窗口，Function Calling Agent 架构；两个工具：`run_sql`（只读连接查 SQLite `ticker_pnl` 视图和 `position_pnl` 表）和 `search_notes`（日记和交易笔记的混合检索：BM25（中文字符 bigram）+ 向量检索（ChromaDB + bge-small-zh，经 fastembed 跑在 ONNX Runtime 上，按需加载），用 RRF 融合；笔记按段分块并带日期/标的表头，支持日期和标的过滤，增量索引；检索评测见 `backend/rag_eval/`）；SSE 流式输出 + session 对话记忆（DeepSeek API）
 
 ## 技术栈
 
