@@ -12,12 +12,31 @@ export interface Position {
   position_id: string | null
   stop_price: number | null   // entry stop
   stop_locked?: boolean       // recorded by the trading system, read-only
+  account: string             // MOOMOO or IBKR:<account id>
+  account_label?: string
+  strategy?: 'swing' | 'long'
+  /** IBKR holdings: share count as of this statement day (prices are live when quoted) */
+  as_of?: string | null
+  priced?: 'live' | 'close'
 }
+
+export interface AccountTotal { account: string; label: string; total: number; as_of: string | null }
 
 export interface Account {
   status: string
   total_assets?: number
   securities_assets?: number
+  accounts?: AccountTotal[]
+}
+
+export interface SourceStatus { ok: boolean | null; message: string; at?: string; fetched_at?: string | null }
+
+export interface AccountsResponse {
+  accounts: {
+    account: string; broker: string; label: string; default_strategy: 'swing' | 'long'
+    long_tickers: string; last_day: string | null; last_nav: number | null
+  }[]
+  sources: Record<string, SourceStatus>
 }
 
 export interface Transaction { action: string; date: string; price: string; qty: string }
@@ -217,4 +236,51 @@ export interface RecapResponse {
   months: (RecapStats & { month: string })[]
   summary: RecapStats
   pool: { initial_base: number; pnl_offset: number; current: number; updated_at: string | null } | null
+}
+
+/** /api/assets: account value over time across accounts */
+export interface AssetPoint {
+  date: string
+  total: number
+  contributed: number
+  pnl: number
+  twr_pct: number
+  drawdown_pct: number
+  spy_pct: number | null
+  values: Record<string, number>
+  transit: number
+}
+
+export interface AssetFlow {
+  id: number
+  account: string
+  account_label: string
+  date: string
+  amount: number
+  kind: 'deposit' | 'withdrawal'
+  label: string
+  /** the other leg of a transfer between own accounts; -1 = marked as not a transfer */
+  pair_id: number | null
+}
+
+export interface AssetsResponse {
+  status: string
+  range: string
+  accounts: { account: string; label: string; value: number | null;
+              sources: { source: string; first: string; last: string; days: number }[] }[]
+  all_accounts: { account: string; label: string }[]
+  kpis: {
+    value: number; as_of: string; twr_pct: number; pnl: number
+    mtd_pct: number | null; ytd_pct: number | null; inception_pct: number; inception: string
+    max_drawdown_pct: number; drawdown_pct: number; spy_pct: number | null
+  }
+  series: AssetPoint[]
+  monthly: { month: string; return_pct: number; flow: number; pnl: number; end_value: number }[]
+  breakdown: {
+    opening: number; deposits: number; withdrawals: number
+    withdrawals_by_label: Record<string, number>; pnl: number; closing: number
+  }
+  flows: AssetFlow[]
+  income: Record<string, number>
+  sources: Record<string, SourceStatus>
 }

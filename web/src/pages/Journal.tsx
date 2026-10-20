@@ -1,3 +1,4 @@
+import { useScope } from '../lib/scope'
 import { useMemo, useState } from 'react'
 import { Search, ChevronLeft, StickyNote } from 'lucide-react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, Cell, ReferenceLine, LineChart, Line } from 'recharts'
@@ -103,7 +104,8 @@ const Tip = ({ active, payload, label }: { active?: boolean; payload?: { value: 
 }
 
 export default function Journal() {
-  const journal = useApi(() => api.getJournal(), [])
+  const { scope } = useScope()
+  const journal = useApi(() => api.getJournal(scope), [scope])
   const notesApi = useApi(() => api.getDailyNotes(), [])
   const [view, setView] = usePersistentState<View>('journal.view', 'days')
   const [query, setQuery] = useState('')

@@ -1,3 +1,4 @@
+import { useScope } from '../lib/scope'
 import { useState, useCallback } from 'react'
 import { usePersistentState } from '../lib/usePersistentState'
 import { ErrorState, Loading } from '../components/PageState'
@@ -250,7 +251,8 @@ function BreakdownTables({ deep }: { deep: DeepStats }) {
 export default function Performance() {
   const [tf, setTf] = usePersistentState<string>('performance.timeframe', 'AT')
   const [selectedSymbol, setSelectedSymbol] = useState<SymbolSummary | null>(null)
-  const { data, error, loading, reload } = useApi(() => api.getPerformance(tf) as Promise<PerfData>, [tf])
+  const { scope } = useScope()
+  const { data, error, loading, reload } = useApi(() => api.getPerformance(tf, scope) as Promise<PerfData>, [tf, scope])
 
   const openSymbol = useCallback((s: SymbolSummary) => setSelectedSymbol(s), [])
 

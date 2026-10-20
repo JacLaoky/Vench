@@ -40,12 +40,15 @@ export default function Dashboard() {
   const weight = (p: Position) => (totalAssets > 0 ? (Math.abs(p.market_val) / totalAssets) * 100 : null)
   const maxWeight = Math.max(...positions.map(p => weight(p) ?? 0), 1)
 
-  function stopSaved(ticker: string, stop: number) {
+  const rowKey = (p: Position) => `${p.account}|${p.ticker}`
+  const accounts = account.accounts ?? []
+
+  function updated(target: Position, patch: Partial<Position>) {
     setData(prev => prev && [
-      { ...prev[0], data: prev[0].data.map(p => p.ticker === ticker ? { ...p, stop_price: stop } : p) },
+      { ...prev[0], data: prev[0].data.map(p => rowKey(p) === rowKey(target) ? { ...p, ...patch } : p) },
       prev[1],
     ])
-    setSelected(p => p && { ...p, stop_price: stop })
+    setSelected(p => p && { ...p, ...patch })
   }
 
   return (
@@ -53,7 +56,8 @@ export default function Dashboard() {
       <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white mb-6">Dashboard</h1>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-8">
-        <StatCard label="Total Assets" value={account.total_assets !== undefined ? usd(account.total_assets) : '—'} />
+        <StatCard label="Total Assets" value={account.total_assets !== undefined ? usd(account.total_assets) : '—'}
+          sub={accounts.length > 1 ? accounts.map(a => `${a.label} ${usd(a.total)}`).join(' · ') : undefined} />
         <StatCard label="Market Value" value={usd(totalMktVal)}
           sub={totalAssets > 0 ? `${((Math.abs(totalMktVal) / totalAssets) * 100).toFixed(1)}% of total assets` : undefined} />
         <StatCard label="Unrealized P&L" value={signedUsd(totalPnl)} positive={totalPnl >= 0} />
@@ -84,11 +88,16 @@ export default function Dashboard() {
               </thead>
               <tbody>
                 {positions.map(p => (
-                  <tr key={p.ticker} onClick={() => setSelected(p)}
+                  <tr key={rowKey(p)} onClick={() => setSelected(p)}
                     className="border-b border-line hover:bg-white/[0.03] transition-colors cursor-pointer">
                     <td className="px-2.5 sm:px-4 py-3">
-                      <div className="font-medium text-white">{p.ticker}</div>
-                      <div className="text-xs text-slate-500 truncate max-w-[120px]">{p.name}</div>
+                      <div className="font-medium text-white flex items-center gap-1.5">
+                        {p.ticker}
+                        {p.strategy === 'long' && <span className="text-[10px] font-normal text-sky-300 bg-sky-500/10 rounded px-1">LT</span>}
+                      </div>
+                      <div className="text-xs text-slate-500 truncate max-w-[140px]">
+                        {accounts.length > 1 ? (p.account_label ?? p.account) : p.name}
+                      </div>
                     </td>
                     <td className="text-right px-2.5 sm:px-4 py-3 text-slate-300 hidden sm:table-cell">{p.qty}</td>
                     <td className="text-right px-2.5 sm:px-4 py-3 text-slate-300 hidden sm:table-cell">${p.cost_price.toFixed(2)}</td>
@@ -129,7 +138,8 @@ export default function Dashboard() {
 
       {selected && (
         <PositionDrawer position={selected} weightPct={weight(selected)} onClose={() => setSelected(null)}
-          onStopSaved={stop => stopSaved(selected.ticker, stop)} />
+          onStopSaved={stop => updated(selected, { stop_price: stop })}
+          onStrategySaved={strategy => updated(selected, { strategy })} />
       )}
     </div>
   )

@@ -1,3 +1,4 @@
+import { useScope } from '../lib/scope'
 import { api } from '../api'
 import { signedUsd, usd } from '../lib/format'
 import { useApi } from '../lib/useApi'
@@ -59,7 +60,8 @@ const TIMEFRAMES = ['1W', '1M', '3M', '1Y', 'YTD', 'AT'] as const
 
 export default function Stats() {
   const [tf, setTf] = usePersistentState<string>('stats.timeframe', 'AT')
-  const { data, error, loading, reload } = useApi(() => api.getStats(tf) as Promise<StatsData>, [tf])
+  const { scope } = useScope()
+  const { data, error, loading, reload } = useApi(() => api.getStats(tf, scope) as Promise<StatsData>, [tf, scope])
 
   if (loading && !data) return <Loading rows={4} />
   if (error && !data) return <ErrorState message={error} onRetry={reload} />

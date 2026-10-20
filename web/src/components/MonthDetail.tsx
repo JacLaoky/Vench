@@ -1,3 +1,4 @@
+import { useScope } from '../lib/scope'
 import { api } from '../api'
 import { useApi } from '../lib/useApi'
 import { fmtR, pnlColor, rColor, signedUsd } from '../lib/format'
@@ -26,7 +27,8 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
 }
 
 export default function MonthDetail({ month, onClose }: { month: JournalMonth; onClose: () => void }) {
-  const { data, error, loading, reload } = useApi(() => api.getMonthDetail(month.monthYear), [month.monthYear])
+  const { scope } = useScope()
+  const { data, error, loading, reload } = useApi(() => api.getMonthDetail(month.monthYear, scope), [month.monthYear, scope])
   const s = data?.data
 
   return (

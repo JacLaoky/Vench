@@ -232,6 +232,91 @@ def init_db():
     _add_column_if_missing(conn, 'trades', 'position_id', "TEXT")
     _add_column_if_missing(conn, 'trades', 'fee', "REAL NOT NULL DEFAULT 0.0")
     _add_column_if_missing(conn, 'trades', 'fee_details', "TEXT NOT NULL DEFAULT '[]'")
+    # Which brokerage account a fill belongs to: MOOMOO, or IBKR:<account id>
+    _add_column_if_missing(conn, 'trades', 'account', "TEXT NOT NULL DEFAULT 'MOOMOO'")
+
+    # Accounts and how their positions count by default: swing (the right-side strategy, the unit
+    # of the journal's win rate and R) or long (long-term holdings, kept out of trade statistics).
+    # long_tickers: tickers held long-term in an otherwise swing account (Moomoo holds both).
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS accounts (
+            account          TEXT PRIMARY KEY,
+            broker           TEXT NOT NULL,
+            label            TEXT NOT NULL,
+            default_strategy TEXT NOT NULL DEFAULT 'swing',
+            long_tickers     TEXT NOT NULL DEFAULT ''
+        )
+    ''')
+    conn.execute(
+        "INSERT OR IGNORE INTO accounts (account, broker, label, default_strategy, long_tickers) "
+        "VALUES ('MOOMOO', 'MOOMOO', 'Moomoo', 'swing', 'GLW,SLV,SOXL')"
+    )
+    # A position's strategy set by hand, overriding the account's default
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS position_strategy (
+            position_id  TEXT PRIMARY KEY,
+            strategy     TEXT NOT NULL
+        )
+    ''')
+
+    # End-of-day net asset value per account. flow = money moved in (+) or out (−) that day
+    # (deposits, withdrawals, transfers): it changes the value but is not performance.
+    # source: flex (IBKR statement), snapshot (Moomoo account query after the close),
+    # reconstructed (rebuilt from fills, cash flows and closing prices)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS account_nav_daily (
+            account     TEXT NOT NULL,
+            date        TEXT NOT NULL,
+            nav         REAL NOT NULL,
+            cash        REAL,
+            stock       REAL,
+            flow        REAL NOT NULL DEFAULT 0,
+            broker_twr  REAL,
+            source      TEXT NOT NULL,
+            PRIMARY KEY (account, date)
+        )
+    ''')
+    # Cash movements: deposit / withdrawal (external), dividend, interest, tax, fee, other.
+    # pair_id links a withdrawal from one account to its deposit in another (an internal
+    # transfer); label is the user's note on what a withdrawal was for (e.g. tuition)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS cash_flows (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            account      TEXT NOT NULL,
+            date         TEXT NOT NULL,
+            amount_usd   REAL NOT NULL,
+            kind         TEXT NOT NULL,
+            description  TEXT NOT NULL DEFAULT '',
+            external_id  TEXT UNIQUE,
+            label        TEXT NOT NULL DEFAULT '',
+            pair_id      INTEGER
+        )
+    ''')
+    # IBKR open positions as of the latest statement day (live quotes are applied on read)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ibkr_positions (
+            account      TEXT NOT NULL,
+            code         TEXT NOT NULL,
+            report_date  TEXT NOT NULL,
+            qty          REAL NOT NULL,
+            cost_price   REAL,
+            cost_money   REAL,
+            mark_price   REAL,
+            value        REAL,
+            unrealized   REAL,
+            side         TEXT NOT NULL,
+            PRIMARY KEY (account, code)
+        )
+    ''')
+    # Outcome of the last run of each data source (survives restarts)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS sync_status (
+            source      TEXT PRIMARY KEY,
+            ok          INTEGER NOT NULL,
+            message     TEXT NOT NULL,
+            at          TEXT NOT NULL
+        )
+    ''')
 
     conn.execute('''
         CREATE TABLE IF NOT EXISTS position_stops (
@@ -303,7 +388,7 @@ def init_db():
 
     # position_pnl is fully derived (rebuilt on every sync) — recreate it when the schema is old
     pnl_cols = {row[1] for row in conn.execute('PRAGMA table_info(position_pnl)')}
-    if pnl_cols and 'initial_1r_usd' not in pnl_cols:
+    if pnl_cols and 'strategy' not in pnl_cols:
         conn.execute('DROP VIEW IF EXISTS ticker_pnl')
         conn.execute('DROP TABLE position_pnl')
     conn.execute('''
@@ -319,11 +404,14 @@ def init_db():
             r_multiple     REAL,
             initial_1r_usd REAL,
             open_time    TEXT,
-            close_time   TEXT
+            close_time   TEXT,
+            account      TEXT,
+            strategy     TEXT
         )
     ''')
 
-    # ticker_pnl: per-ticker net P&L over closed positions (use this for ranking/win-rate questions)
+    # ticker_pnl: per-ticker net P&L over closed swing positions (use this for ranking/win-rate
+    # questions); long-term holdings are not trades and stay out of it
     conn.execute('''
         CREATE VIEW IF NOT EXISTS ticker_pnl AS
         SELECT
@@ -336,7 +424,7 @@ def init_db():
             ROUND(MIN(realized_pnl), 2)           AS worst_position,
             ROUND(SUM(is_win)*100.0/COUNT(*), 1)  AS win_rate_pct
         FROM position_pnl
-        WHERE status = 'closed'
+        WHERE status = 'closed' AND strategy = 'swing'
         GROUP BY code
     ''')
 
@@ -365,7 +453,7 @@ def assign_position_ids():
     """
     conn = sqlite3.connect(DB_FILE)
     df = pd.read_sql_query(
-        'SELECT order_id, code, trd_side, qty, create_time, position_id AS old_id FROM trades', conn
+        'SELECT order_id, account, code, trd_side, qty, create_time, position_id AS old_id FROM trades', conn
     )
     if df.empty:
         conn.close()
@@ -739,11 +827,13 @@ def _refresh_r_ledger_in_background():
         threading.Thread(target=refresh_r_ledger, daemon=True).start()
 
 
-def ledger_rows(period: str = 'AT') -> pd.DataFrame:
-    """R-ledger trades whose close date falls in the period."""
+def ledger_rows(period: str = 'AT', scope: str = 'all') -> pd.DataFrame:
+    """R-ledger trades whose close date falls in the period. They are all swing trades."""
     conn = sqlite3.connect(DB_FILE)
     rows = pd.read_sql_query('SELECT * FROM r_ledger ORDER BY close_date', conn)
     conn.close()
+    if scope == 'long':
+        rows = rows.iloc[0:0]
     rows['create_time'] = pd.to_datetime(rows['close_date'])
     return slice_by_period(rows, period)
 
@@ -796,18 +886,20 @@ def _build_positions() -> pd.DataFrame:
     )
     conn.close()
 
+    strategy = df.groupby('position_id')['strategy'].first().rename('strategy').reset_index()
     summary = (P.summarize(df, resets)
                .merge(stops, on='position_id', how='left')
-               .merge(ledger, on='position_id', how='left'))
+               .merge(ledger, on='position_id', how='left')
+               .merge(strategy, on='position_id', how='left'))
     # object dtype keeps "no R" as None (a float column would carry NaN)
     summary['r_multiple'] = summary['r_multiple'].astype(object).where(summary['r_multiple'].notna(), None)
     summary['is_win'] = summary['net_pnl'] > 0
     return summary
 
 
-def closed_positions(period: str = 'AT') -> pd.DataFrame:
+def closed_positions(period: str = 'AT', scope: str = 'all') -> pd.DataFrame:
     """Closed positions whose close time falls in the period — the unit for win rate/expectancy."""
-    pos = load_positions()
+    pos = scope_filter(load_positions(), scope)
     if pos.empty:
         return pos
     closed = pos[pos['status'] == 'closed'].copy()
@@ -847,11 +939,54 @@ def _build_df_with_pnl() -> pd.DataFrame:
     df['create_time'] = pd.to_datetime(df['create_time'], format='mixed')
 
     df['fee'] = pd.to_numeric(df['fee'], errors='coerce').fillna(0)
+    df['account'] = df['account'].fillna('MOOMOO')
     df = calculate_trades_pnl(df)
     # Net P&L per fill: realized_pnl minus this order's own fee (entry fees land on entry fills)
     df['net_realized_pnl'] = df['realized_pnl'] - df['fee']
     df['is_win'] = (df['net_realized_pnl'] > 0) & (df['realized_pnl'] != 0)
+    df['strategy'] = position_strategies(df)
     return df
+
+
+STRATEGIES = ('swing', 'long')
+SCOPES = ('swing', 'long', 'all')
+
+
+def position_strategies(df: pd.DataFrame) -> pd.Series:
+    """swing or long for every fill, decided per position: a strategy set by hand wins; a position
+    the trading system traded (it is in the R ledger) is swing; a ticker listed as long-term for
+    its account is long; otherwise the account's default (IBKR accounts not set up yet: long)."""
+    conn = sqlite3.connect(DB_FILE)
+    accounts = {a: (d, {t.strip().upper() for t in lt.split(',') if t.strip()})
+                for a, d, lt in conn.execute('SELECT account, default_strategy, long_tickers FROM accounts')}
+    manual = dict(conn.execute('SELECT position_id, strategy FROM position_strategy'))
+    ledger = {r[0] for r in conn.execute('SELECT position_id FROM r_ledger')}
+    conn.close()
+
+    def decide(pid, account, code) -> str:
+        if pid in manual:
+            return manual[pid]
+        if pid in ledger:
+            return 'swing'
+        default, long_tickers = accounts.get(account, ('swing' if account == 'MOOMOO' else 'long', set()))
+        return 'long' if code.split('.')[-1].upper() in long_tickers else default
+
+    first = df.sort_values(['create_time', 'order_id']).groupby('position_id', sort=False).first()
+    by_position = {pid: decide(pid, r['account'], r['code']) for pid, r in first.iterrows()}
+    return df['position_id'].map(by_position).fillna('swing')
+
+
+def scope_filter(df: pd.DataFrame, scope: str) -> pd.DataFrame:
+    """Fills or positions of one strategy (swing / long), or all of them."""
+    if scope not in STRATEGIES or df.empty or 'strategy' not in df:
+        return df
+    return df[df['strategy'] == scope]
+
+
+def request_scope() -> str:
+    """?scope= on the trade-review endpoints: swing (default), long or all."""
+    scope = request.args.get('scope', 'swing')
+    return scope if scope in SCOPES else 'swing'
 
 
 def slice_by_period(df: pd.DataFrame, period: str) -> pd.DataFrame:
@@ -886,8 +1021,8 @@ def _write_position_pnl():
         conn.execute("DELETE FROM position_pnl")
         conn.executemany(
             "INSERT INTO position_pnl (position_id, code, direction, status, realized_pnl, is_win, "
-            "entry_qty, avg_entry, r_multiple, initial_1r_usd, open_time, close_time) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "entry_qty, avg_entry, r_multiple, initial_1r_usd, open_time, close_time, account, strategy) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 (
                     r.position_id, r.code, r.direction, r.status,
@@ -898,6 +1033,7 @@ def _write_position_pnl():
                     None if pd.isna(r.initial_1r_usd) else float(r.initial_1r_usd),
                     str(r.open_time),
                     None if pd.isna(r.close_time) else str(r.close_time),
+                    r.account, r.strategy,
                 )
                 for r in pos.itertuples()
             ]
@@ -1022,7 +1158,7 @@ def _reconcile_residues(conn) -> None:
     held_qty = {r['code']: float(r['qty']) for _, r in held.iterrows()} if not held.empty else {}
 
     rows = conn.execute(
-        'SELECT order_id, code, trd_side, qty FROM trades ORDER BY create_time, order_id'
+        "SELECT order_id, code, trd_side, qty FROM trades WHERE account = 'MOOMOO' ORDER BY create_time, order_id"
     ).fetchall()
     resets = load_resets(conn)
     running, last_order = {}, {}
@@ -1038,6 +1174,248 @@ def _reconcile_residues(conn) -> None:
             )
             print(f"🔧 {code}: broker is flat but orders leave {qty:+.4f} — position closed after {last_order[code]}")
     conn.commit()
+
+
+# ======================== Data source status ========================
+
+def set_status(source: str, ok: bool, message: str) -> None:
+    conn = sqlite3.connect(DB_FILE)
+    with conn:
+        conn.execute(
+            'INSERT OR REPLACE INTO sync_status (source, ok, message, at) VALUES (?, ?, ?, ?)',
+            (source, int(ok), message[:500], datetime.now().isoformat(timespec='seconds')),
+        )
+    conn.close()
+
+
+def get_statuses() -> dict:
+    conn = sqlite3.connect(DB_FILE)
+    rows = conn.execute('SELECT source, ok, message, at FROM sync_status').fetchall()
+    conn.close()
+    return {s: {'ok': bool(ok), 'message': m, 'at': at} for s, ok, m, at in rows}
+
+
+def _after_import() -> None:
+    """Rebuild everything derived from fills after a background import added some."""
+    assign_position_ids()
+    conn = sqlite3.connect(DB_FILE)
+    with conn:
+        apply_entry_stops(conn)
+    conn.close()
+    invalidate_cache()
+    _write_position_pnl()
+
+
+# ======================== IBKR (Flex statements) ========================
+# Read through IBKR's Flex Web Service with a token from Client Portal (Performance & Reports →
+# Flex Queries → Flex Web Service); the query and its sections are described in ibkr_flex.py.
+IBKR_FLEX_TOKEN    = os.environ.get('IBKR_FLEX_TOKEN', '')
+IBKR_FLEX_QUERY_ID = os.environ.get('IBKR_FLEX_QUERY_ID', '')
+FLEX_REFRESH_SECS  = 6 * 3600       # a statement only changes once a day; don't ask more often
+FLEX_ARCHIVE_DIR   = 'ibkr_flex'    # raw statements, kept FLEX_ARCHIVE_DAYS for debugging
+FLEX_ARCHIVE_DAYS  = 7
+_flex_lock = threading.Lock()
+
+
+def ibkr_account(account_id: str) -> str:
+    return f'IBKR:{account_id}'
+
+
+def import_ibkr_flex(force: bool = False) -> None:
+    """Fetch the Flex statement and upsert fills, daily NAV, cash flows and open positions.
+    Safe to repeat: every row is keyed by IBKR's own ids or by account and day."""
+    import ibkr_flex
+    if not (IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_ID):
+        set_status('ibkr_flex', False, 'not configured (IBKR_FLEX_TOKEN / IBKR_FLEX_QUERY_ID)')
+        return
+    last = get_statuses().get('ibkr_flex')
+    if (not force and last and last['ok']
+            and (datetime.now() - datetime.fromisoformat(last['at'])).total_seconds() < FLEX_REFRESH_SECS):
+        return
+    try:
+        xml = ibkr_flex.fetch_statement(IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID)
+        os.makedirs(FLEX_ARCHIVE_DIR, mode=0o700, exist_ok=True)
+        path = os.path.join(FLEX_ARCHIVE_DIR, datetime.now().strftime('%Y%m%d-%H%M%S.xml'))
+        with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'wb') as f:
+            f.write(xml)
+        for old in os.listdir(FLEX_ARCHIVE_DIR):
+            old_path = os.path.join(FLEX_ARCHIVE_DIR, old)
+            if _time.time() - os.path.getmtime(old_path) > FLEX_ARCHIVE_DAYS * 86400:
+                os.remove(old_path)
+
+        data = ibkr_flex.parse_statement(xml)
+        conn = sqlite3.connect(DB_FILE)
+        with conn:
+            for acc in data['accounts']:
+                conn.execute(
+                    "INSERT OR IGNORE INTO accounts (account, broker, label, default_strategy) VALUES (?, 'IBKR', ?, 'long')",
+                    (ibkr_account(acc), f'IBKR …{acc[-2:]}'),
+                )
+            conn.executemany(
+                """INSERT INTO trades (order_id, account, code, trd_side, price, qty, create_time, fee, fee_details)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(order_id) DO UPDATE SET account = excluded.account, price = excluded.price,
+                       qty = excluded.qty, create_time = excluded.create_time, fee = excluded.fee,
+                       fee_details = excluded.fee_details""",
+                [(t['order_id'], ibkr_account(t['account']), t['code'], t['trd_side'], t['price'], t['qty'],
+                  t['create_time'], t['fee'], json.dumps(t['fee_details'])) for t in data['trades']],
+            )
+            conn.executemany(
+                """INSERT OR REPLACE INTO account_nav_daily (account, date, nav, cash, stock, flow, broker_twr, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, 'flex')""",
+                [(ibkr_account(n['account']), n['date'], n['nav'], n['cash'], n['stock'],
+                  n['flow'] or 0.0, n['broker_twr']) for n in data['nav']],
+            )
+            conn.executemany(
+                """INSERT INTO cash_flows (account, date, amount_usd, kind, description, external_id)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(external_id) DO UPDATE SET account = excluded.account, date = excluded.date,
+                       amount_usd = excluded.amount_usd, kind = excluded.kind, description = excluded.description""",
+                [(ibkr_account(c['account']), c['date'], c['amount_usd'], c['kind'], c['description'],
+                  c['external_id']) for c in data['cash_flows']],
+            )
+            for acc in data['accounts']:
+                conn.execute('DELETE FROM ibkr_positions WHERE account = ?', (ibkr_account(acc),))
+            conn.executemany(
+                """INSERT INTO ibkr_positions (account, code, report_date, qty, cost_price, cost_money,
+                       mark_price, value, unrealized, side) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                [(ibkr_account(p['account']), p['code'], p['report_date'], p['qty'], p['cost_price'],
+                  p['cost_money'], p['mark_price'], p['value'], p['unrealized'], p['side'])
+                 for p in data['positions'] if abs(p['qty']) > P.EPS],
+            )
+        conn.close()
+        last_day = max((n['date'] for n in data['nav']), default='—')
+        set_status('ibkr_flex', True, f"{len(data['accounts'])} accounts, {len(data['trades'])} orders, "
+                                      f"NAV through {last_day}")
+        print(f"[ibkr_flex] {len(data['trades'])} orders, {len(data['nav'])} NAV days, "
+              f"{len(data['cash_flows'])} cash flows, {len(data['positions'])} positions")
+    except Exception as e:
+        set_status('ibkr_flex', False, f'fetch failed: {e}')
+        print(f"[ibkr_flex] fetch failed: {e}")
+
+
+def start_ibkr_flex_import(force: bool = False) -> None:
+    """Run the Flex import off the request thread (it polls IBKR for up to a few minutes)."""
+    def run():
+        if not _flex_lock.acquire(blocking=False):
+            return
+        try:
+            import_ibkr_flex(force)
+            with _sync_lock:
+                _after_import()
+        finally:
+            _flex_lock.release()
+    threading.Thread(target=run, daemon=True).start()
+
+
+# ======================== Moomoo cash flows and end-of-day value ========================
+MOOMOO_FLOWS_FROM = '2025-01-01'   # before the account's first fills (November 2025), to catch the first deposits
+_moomoo_flow_lock = threading.Lock()
+
+
+def _moomoo_flow_kind(cashflow_type: str) -> str:
+    t = cashflow_type.lower()
+    for word, kind in (('deposit', 'deposit'), ('withdraw', 'withdrawal'), ('dividend', 'dividend'),
+                       ('coupon', 'interest'), ('interest', 'interest'), ('tax', 'tax'),
+                       ('fund', 'fund'), ('fee', 'fee')):
+        if word in t:
+            return kind
+    return 'other'
+
+
+def sync_moomoo_cash_flows(max_days: int | None = None) -> int:
+    """Read Moomoo's cash flow statement day by day from where the last run stopped (the first run
+    goes back to MOOMOO_FLOWS_FROM). Fund subscriptions/redemptions are the idle-cash sweep inside
+    the account (kind 'fund'), not money moving in or out. Returns the number of days read."""
+    if not _moomoo_flow_lock.acquire(blocking=False):
+        return 0
+    try:
+        cursor = get_statuses().get('moomoo_cash_flow_cursor')
+        day = (datetime.strptime(cursor['message'], '%Y-%m-%d') - timedelta(days=3)
+               if cursor else datetime.strptime(MOOMOO_FLOWS_FROM, '%Y-%m-%d'))
+        today = now_et().to_pydatetime()
+        read = 0
+        while day.date() <= today.date() and (max_days is None or read < max_days):
+            date = day.strftime('%Y-%m-%d')
+            ret, data = trd_ctx.get_acc_cash_flow(clearing_date=date, trd_env=TRD_ENV, acc_id=MOOMOO_ACC_ID)
+            if ret != RET_OK:
+                set_status('moomoo_cash_flow', False, f'{date}: {data}')
+                return read
+            if not data.empty:
+                conn = sqlite3.connect(DB_FILE)
+                with conn:
+                    conn.executemany(
+                        """INSERT INTO cash_flows (account, date, amount_usd, kind, description, external_id)
+                           VALUES ('MOOMOO', ?, ?, ?, ?, ?)
+                           ON CONFLICT(external_id) DO UPDATE SET amount_usd = excluded.amount_usd,
+                               kind = excluded.kind, description = excluded.description""",
+                        [(date, float(r['cashflow_amount']), _moomoo_flow_kind(str(r['cashflow_type'])),
+                          f"{r['cashflow_type']} ({r['currency']})" if r['currency'] != 'USD' else str(r['cashflow_type']),
+                          f"MM-{date}-{r['cashflow_id']}-{r['cashflow_type']}")
+                         for _, r in data.iterrows()],
+                    )
+                conn.close()
+            set_status('moomoo_cash_flow_cursor', True, date)
+            read += 1
+            day += timedelta(days=1)
+            _time.sleep(1.6)   # stay well inside the trade API's request rate limit
+        refresh_moomoo_nav_flows()
+        set_status('moomoo_cash_flow', True, f'read through {min(day, today).strftime("%Y-%m-%d")}')
+        reconstruct_moomoo_nav()
+        return read
+    except Exception as e:
+        set_status('moomoo_cash_flow', False, f'failed: {e}')
+        return 0
+    finally:
+        _moomoo_flow_lock.release()
+
+
+def refresh_moomoo_nav_flows() -> None:
+    """Moomoo's daily value rows take their flow from the cash flow statement (deposits and
+    withdrawals of that day)."""
+    conn = sqlite3.connect(DB_FILE)
+    with conn:
+        conn.execute("""
+            UPDATE account_nav_daily SET flow = COALESCE((
+                SELECT SUM(amount_usd) FROM cash_flows c
+                WHERE c.account = account_nav_daily.account AND c.date = account_nav_daily.date
+                  AND c.kind IN ('deposit', 'withdrawal')), 0)
+            WHERE account = 'MOOMOO'
+        """)
+    conn.close()
+
+
+def record_moomoo_snapshot() -> None:
+    """After the close on a weekday, store today's Moomoo account value (total assets include
+    the money-market fund). Earlier in the day the value is not the day's close, so nothing is
+    written."""
+    now = now_et()
+    if now.dayofweek >= 5 or now.hour < 16:
+        return
+    ret, data = trd_ctx.accinfo_query(trd_env=TRD_ENV, acc_id=MOOMOO_ACC_ID, currency=Currency.USD)
+    if ret != RET_OK:
+        set_status('moomoo_snapshot', False, str(data))
+        return
+    row = data.iloc[0]
+    # cash-like balance = everything that isn't stock: cash plus the money-market fund sweep
+    total, stock = float(row.get('total_assets', 0)), float(row.get('market_val', 0))
+    cash = total - stock
+    date = now.strftime('%Y-%m-%d')
+    conn = sqlite3.connect(DB_FILE)
+    with conn:
+        conn.execute(
+            """INSERT OR REPLACE INTO account_nav_daily (account, date, nav, cash, stock, flow, source)
+               VALUES ('MOOMOO', ?, ?, ?, ?, 0, 'snapshot')""",
+            (date, total, cash, stock),
+        )
+    conn.close()
+    refresh_moomoo_nav_flows()
+    set_status('moomoo_snapshot', True, f'{date}: ${total:,.2f}')
+
+
+def start_moomoo_cash_flows() -> None:
+    """Catch up on Moomoo cash flows off the request thread (the first run reads ~a year of days)."""
+    threading.Thread(target=sync_moomoo_cash_flows, daemon=True).start()
 
 
 
@@ -1282,22 +1660,28 @@ def get_portfolio():
                 'pl_ratio':      round(float(ratio), 4),
                 'today_pl_val':  round(float(r.get('today_pl_val', 0)), 2),
                 'side':          str(r.get('position_side', 'LONG')),
+                'account':       'MOOMOO',
+                'as_of':         None,
             })
+        rows += ibkr_holdings()
         # Sort by market value descending
-        rows.sort(key=lambda x: x['market_val'], reverse=True)
+        rows.sort(key=lambda x: abs(x['market_val']), reverse=True)
 
-        # Enrich with the open position's id and stops from the position engine
+        # Enrich with the open position's id, stops and strategy from the position engine
         if rows:
             pos = load_positions()
             open_pos = {}
             if not pos.empty:
                 for r in pos[pos['status'] == 'open'].sort_values('open_time').itertuples():
-                    open_pos[r.code.replace('US.', '').upper()] = r
+                    open_pos[(r.account, r.code.replace('US.', '').upper())] = r
+            labels, defaults = account_labels()
             for row in rows:
-                op = open_pos.get(row['ticker'].upper())
-                row['position_id']  = op.position_id if op else None
-                row['stop_price']   = None if not op or pd.isna(op.stop_price) else float(op.stop_price)
-                row['stop_locked']  = bool(op and not pd.isna(op.stop_locked) and op.stop_locked)
+                op = open_pos.get((row['account'], row['ticker'].upper()))
+                row['position_id']   = op.position_id if op else None
+                row['stop_price']    = None if not op or pd.isna(op.stop_price) else float(op.stop_price)
+                row['stop_locked']   = bool(op and not pd.isna(op.stop_locked) and op.stop_locked)
+                row['strategy']      = op.strategy if op else defaults.get(row['account'], 'long')
+                row['account_label'] = labels.get(row['account'], row['account'])
 
         return jsonify({"status": "success", "data": rows}), 200
     except Exception as e:
@@ -1332,6 +1716,14 @@ def _run_sync():
         }), 429
     if sync_trades_to_db():
         _last_sync_time = time.time()
+        try:
+            record_moomoo_snapshot()
+        except Exception as e:
+            set_status('moomoo_snapshot', False, f'failed: {e}')
+        # IBKR statements and Moomoo's cash flow statement are slow to read: they run in the
+        # background and rebuild positions themselves when they finish
+        start_ibkr_flex_import(force=request.args.get('flex') == '1')
+        start_moomoo_cash_flows()
         refresh_r_ledger(force=True)
         assign_position_ids()
         conn = sqlite3.connect(DB_FILE)
@@ -1435,7 +1827,7 @@ def get_tag_stats():
     timeframe = request.args.get('timeframe', 'AT').upper()
 
     # One sample per closed position (net of fees), tagged with every tag on any of its fills
-    closed = closed_positions(timeframe)
+    closed = closed_positions(timeframe, request_scope())
     if closed.empty:
         return jsonify({'status': 'success', 'timeframe': timeframe, 'data': []}), 200
 
@@ -1506,14 +1898,16 @@ def get_all_trades():
     if df.empty:
         return jsonify({"status": "success", "data": []}), 200
 
-    closed = df[df['realized_pnl'] != 0].sort_values('create_time', ascending=False)
+    scoped = scope_filter(df, request_scope())
+    closed = scoped[scoped['realized_pnl'] != 0].sort_values('create_time', ascending=False)
     result = [build_trade_card(row, df) for _, row in closed.iterrows()]
     return jsonify({"status": "success", "data": result}), 200
 
 
 @app.route('/api/journal', methods=['GET'])
 def get_journal_data():
-    df = load_df_with_pnl()
+    scope = request_scope()
+    df = scope_filter(load_df_with_pnl(), scope)
     if df.empty:
         return jsonify({"status": "empty", "daily": [], "monthly": []}), 200
 
@@ -1527,7 +1921,7 @@ def get_journal_data():
     ex = realized_exits(df)
     ex_day   = ex['time'].dt.strftime('%Y-%m-%d')
     ex_month = ex['time'].dt.strftime('%Y-%m')
-    cp = closed_positions('AT')
+    cp = closed_positions('AT', scope)
     cp_day   = cp['close_time'].dt.strftime('%Y-%m-%d') if not cp.empty else pd.Series(dtype=str)
     cp_month = cp['close_time'].dt.strftime('%Y-%m') if not cp.empty else pd.Series(dtype=str)
 
@@ -1635,18 +2029,19 @@ def get_journal_data():
 def get_trading_stats():
     """Core trading metrics with dynamic time slicing (1W/1M/3M/YTD/1Y/AT)."""
     period = request.args.get('period', '1M')
+    scope = request_scope()
 
     df_all = load_df_with_pnl()
     if df_all.empty:
         return jsonify({"status": "empty", "message": "No trade data yet"}), 200
 
-    df = slice_by_period(df_all, period)
+    df = slice_by_period(scope_filter(df_all, scope), period)
 
     # P&L is realized P&L (every exit, partial sells included, net of fees), the same as Performance;
     # trade statistics are per closed position (net of every fill's fees)
     ex     = realized_exits(df)
     total_pnl = float(ex['net'].sum()) if not ex.empty else 0.0
-    cp     = closed_positions(period)
+    cp     = closed_positions(period, scope)
     n_pos  = len(cp)
     won    = cp[cp['is_win']] if n_pos else cp
     lost   = cp[~cp['is_win']] if n_pos else cp
@@ -1746,19 +2141,21 @@ def get_monthly_details():
     if df_all.empty:
         return jsonify({"status": "empty"}), 200
 
+    scope = request_scope()
     df_all['month_label'] = df_all['create_time'].dt.strftime('%B, %Y')
-    month_closed = df_all[
-        (df_all['month_label'] == month_str) & (df_all['realized_pnl'] != 0)
+    scoped = scope_filter(df_all, scope)
+    month_closed = scoped[
+        (scoped['month_label'] == month_str) & (scoped['realized_pnl'] != 0)
     ].copy()
 
     if month_closed.empty:
         return jsonify({"status": "empty"}), 200
 
     # Deep stats over positions that closed in this month
-    cp = closed_positions('AT')
+    cp = closed_positions('AT', scope)
     month_cp = cp[cp['close_time'].dt.strftime('%B, %Y') == month_str] if not cp.empty else cp
     stats = deep_stats(month_cp)
-    lr = ledger_rows('AT')
+    lr = ledger_rows('AT', scope)
     stats["r"] = r_stats(lr[lr['create_time'].dt.strftime('%B, %Y') == month_str] if not lr.empty else lr)
 
     # Full trade log
@@ -1893,13 +2290,14 @@ def get_performance():
     day-of-week distribution, deep stats, and a daily equity / drawdown curve.
     """
     period = request.args.get('period', '1M')
+    scope = request_scope()
 
     df_all = load_df_with_pnl()
     if df_all.empty:
         return jsonify({"status": "empty"}), 200
 
-    df = slice_by_period(df_all, period)
-    cp = closed_positions(period)
+    df = slice_by_period(scope_filter(df_all, scope), period)
+    cp = closed_positions(period, scope)
 
     # Money is booked when it is realized; a trade is judged when it is finished.
     # P&L counts every exit in the period (partial sells included, net of fees). Win rate and the
@@ -2005,7 +2403,7 @@ def get_performance():
             "sortino_ratio":       sortino_ratio,
             "kelly_pct":           kelly_pct,
         },
-        "r_stats":        r_stats(ledger_rows(period)),
+        "r_stats":        r_stats(ledger_rows(period, scope)),
         "monthly_bars":   monthly_bars,
         "dow_stats":      dow_stats,
         "deep_stats":     deep_stats(cp),
@@ -2813,17 +3211,18 @@ def get_holding_trades(ticker):
     """
     ticker_clean = ticker.replace('US.', '').upper()
     position_id  = request.args.get('position_id')   # optional
+    account      = request.args.get('account')       # optional: the account holding it
 
     try:
         conn = sqlite3.connect(DB_FILE)
 
         # Pull ALL trades for this ticker so compute_realized_pnl has full history
         df_all = pd.read_sql(
-            """SELECT order_id, code, trd_side, price, qty, create_time, position_id
+            """SELECT order_id, account, code, trd_side, price, qty, create_time, position_id
                FROM trades
-               WHERE UPPER(REPLACE(code, 'US.', '')) = ?
+               WHERE UPPER(REPLACE(code, 'US.', '')) = ? AND (? IS NULL OR account = ?)
                ORDER BY create_time ASC""",
-            conn, params=(ticker_clean,)
+            conn, params=(ticker_clean, account, account)
         )
 
         # Fetch stop prices for all positions of this ticker
@@ -2849,10 +3248,12 @@ def get_holding_trades(ticker):
         else:
             # Auto-detect the currently open position(s) of this ticker
             pos = load_positions()
-            open_pids = set(
-                pos[(pos['status'] == 'open') &
-                    (pos['code'].str.replace('US.', '').str.upper() == ticker_clean)]['position_id']
-            ) if not pos.empty else set()
+            open_pids = set()
+            if not pos.empty:
+                mine = (pos['status'] == 'open') & (pos['code'].str.replace('US.', '').str.upper() == ticker_clean)
+                if account:
+                    mine &= pos['account'] == account
+                open_pids = set(pos[mine]['position_id'])
             if not open_pids:
                 return jsonify({'status': 'success', 'data': [], 'r_multiple': None}), 200
             target_df = df_pnl[df_pnl['position_id'].isin(open_pids)].copy()
@@ -2951,9 +3352,8 @@ def get_holding_trades(ticker):
 
 @app.route('/api/account', methods=['GET'])
 def get_account():
-    """Returns USD account balance: total_assets, securities_assets.
-    Cached for ACCOUNT_CACHE_SECS seconds.
-    """
+    """Total assets across accounts: Moomoo's live total plus each IBKR account's cash from its
+    latest statement and its holdings at live prices. Cached for ACCOUNT_CACHE_SECS seconds."""
     global _account_cache, _account_cache_time
 
     if (_account_cache is not None
@@ -2970,13 +3370,28 @@ def get_account():
             return jsonify({'status': 'error', 'message': str(data)}), 500
 
         row = data.iloc[0]
-        total_assets     = float(row.get('total_assets',     0))
-        securities_assets = float(row.get('securities_assets', 0))
+        moomoo_total = float(row.get('total_assets', 0))
+        labels, _ = account_labels()
+        accounts = [{'account': 'MOOMOO', 'label': labels.get('MOOMOO', 'Moomoo'),
+                     'total': round(moomoo_total, 2), 'as_of': None}]
+        holdings = ibkr_holdings()
+        conn = sqlite3.connect(DB_FILE)
+        latest = conn.execute(
+            "SELECT n.account, n.cash, n.date FROM account_nav_daily n "
+            "JOIN (SELECT account, MAX(date) AS d FROM account_nav_daily "
+            "      WHERE account LIKE 'IBKR:%' AND nav > 0 GROUP BY account) m "
+            "  ON n.account = m.account AND n.date = m.d"
+        ).fetchall()
+        conn.close()
+        for acc, cash, day in latest:
+            value = (cash or 0.0) + sum(h['market_val'] for h in holdings if h['account'] == acc)
+            accounts.append({'account': acc, 'label': labels.get(acc, acc), 'total': round(value, 2), 'as_of': day})
 
         payload = {
-            'status':           'success',
-            'total_assets':     round(total_assets, 2),
-            'securities_assets': round(securities_assets, 2),
+            'status':            'success',
+            'total_assets':      round(sum(a['total'] for a in accounts), 2),
+            'securities_assets': round(float(row.get('securities_assets', 0)), 2),
+            'accounts':          accounts,
         }
         _account_cache      = payload
         _account_cache_time = _time.time()
@@ -2985,6 +3400,422 @@ def get_account():
     except Exception as e:
         import traceback; traceback.print_exc()
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ======================== Accounts and live prices ========================
+
+_quote_cache: dict = {}
+QUOTE_CACHE_SECS = 30
+
+
+def live_quotes(codes: list[str]) -> dict:
+    """{code: (last price, previous close)} from Moomoo's market snapshot; codes it can't price are
+    left out (callers fall back to the statement's closing price)."""
+    now = _time.time()
+    fresh = {c: v for c, (v, t) in list(_quote_cache.items()) if c in codes and now - t < QUOTE_CACHE_SECS}
+    missing = [c for c in codes if c not in fresh]
+    if missing:
+        try:
+            with _quote_lock:
+                ret, data = quote_ctx.get_market_snapshot(missing)
+            if ret == RET_OK:
+                for _, r in data.iterrows():
+                    value = (float(r['last_price']), float(r['prev_close_price']))
+                    _quote_cache[r['code']] = (value, now)
+                    fresh[r['code']] = value
+            else:
+                print(f"[quotes] snapshot failed: {data}")
+        except Exception as e:
+            print(f"[quotes] snapshot failed: {e}")
+    return fresh
+
+
+def ibkr_holdings() -> list[dict]:
+    """IBKR open positions (as of the latest statement) priced live, shaped like /api/portfolio rows."""
+    conn = sqlite3.connect(DB_FILE)
+    rows = conn.execute(
+        'SELECT account, code, report_date, qty, cost_price, mark_price, side FROM ibkr_positions'
+    ).fetchall()
+    conn.close()
+    quotes = live_quotes(sorted({r[1] for r in rows})) if rows else {}
+    out = []
+    for account, code, day, qty, cost, mark, side in rows:
+        last, prev = quotes.get(code, (mark or 0.0, None))
+        cost = cost or 0.0
+        pnl = (last - cost) * qty
+        ticker = code.replace('US.', '')
+        out.append({
+            'ticker': ticker, 'name': ticker, 'qty': qty, 'can_sell_qty': qty,
+            'cost_price': round(cost, 4), 'market_val': round(qty * last, 2),
+            'pl_val': round(pnl, 2),
+            'pl_ratio': round(pnl / abs(cost * qty) * 100, 4) if cost and qty else 0.0,
+            'today_pl_val': round((last - prev) * qty, 2) if prev else 0.0,
+            'side': side, 'account': account,
+            # the share count is as of this statement day; the price is live when it could be quoted
+            'as_of': day, 'priced': 'live' if code in quotes else 'close',
+        })
+    return out
+
+
+def account_labels() -> tuple[dict, dict]:
+    conn = sqlite3.connect(DB_FILE)
+    rows = conn.execute('SELECT account, label, default_strategy FROM accounts').fetchall()
+    conn.close()
+    return {a: l for a, l, _ in rows}, {a: d for a, _, d in rows}
+
+
+@app.route('/api/accounts', methods=['GET'])
+def get_accounts():
+    """Accounts, how their positions count, their latest daily value, and data source health."""
+    conn = sqlite3.connect(DB_FILE)
+    rows = conn.execute(
+        "SELECT a.account, a.broker, a.label, a.default_strategy, a.long_tickers, "
+        "  (SELECT MAX(date) FROM account_nav_daily n WHERE n.account = a.account), "
+        "  (SELECT nav FROM account_nav_daily n WHERE n.account = a.account ORDER BY date DESC LIMIT 1) "
+        "FROM accounts a ORDER BY a.broker, a.account"
+    ).fetchall()
+    conn.close()
+    return jsonify({
+        'status': 'success',
+        'accounts': [{'account': a, 'broker': b, 'label': l, 'default_strategy': d, 'long_tickers': lt,
+                      'last_day': day, 'last_nav': nav} for a, b, l, d, lt, day, nav in rows],
+        'sources': {**get_statuses(), 'r_ledger': dict(_r_ledger_status)},
+    }), 200
+
+
+@app.route('/api/accounts/<path:account>', methods=['PATCH'])
+def update_account(account: str):
+    body = request.get_json(force=True) or {}
+    fields = {}
+    if 'label' in body:
+        fields['label'] = str(body['label']).strip()[:40] or account
+    if body.get('default_strategy') in STRATEGIES:
+        fields['default_strategy'] = body['default_strategy']
+    if 'long_tickers' in body:
+        fields['long_tickers'] = ','.join(t.strip().upper() for t in str(body['long_tickers']).split(',') if t.strip())
+    if not fields:
+        return jsonify({'status': 'error', 'message': 'nothing to update'}), 400
+    conn = sqlite3.connect(DB_FILE)
+    with conn:
+        cur = conn.execute(f"UPDATE accounts SET {', '.join(f'{k} = ?' for k in fields)} WHERE account = ?",
+                           (*fields.values(), account))
+    conn.close()
+    if cur.rowcount == 0:
+        return jsonify({'status': 'error', 'message': 'account not found'}), 404
+    invalidate_cache()
+    _write_position_pnl()
+    return jsonify({'status': 'success', **fields}), 200
+
+
+@app.route('/api/positions/<position_id>/strategy', methods=['PATCH'])
+def set_position_strategy(position_id: str):
+    """Count one position as swing or long by hand; strategy null returns it to the account's rule."""
+    strategy = (request.get_json(force=True) or {}).get('strategy')
+    if strategy is not None and strategy not in STRATEGIES:
+        return jsonify({'status': 'error', 'message': 'strategy must be swing, long or null'}), 400
+    conn = sqlite3.connect(DB_FILE)
+    with conn:
+        if strategy is None:
+            conn.execute('DELETE FROM position_strategy WHERE position_id = ?', (position_id,))
+        else:
+            conn.execute('INSERT OR REPLACE INTO position_strategy (position_id, strategy) VALUES (?, ?)',
+                         (position_id, strategy))
+    conn.close()
+    invalidate_cache()
+    _write_position_pnl()
+    return jsonify({'status': 'success', 'position_id': position_id, 'strategy': strategy}), 200
+
+
+# ======================== Asset tracking (account value over time) ========================
+# Kinds of Moomoo cash flow that move the account's cash: money in/out and income/costs.
+# 'fund' (the idle-cash sweep into the money-market fund) stays inside the account's cash-like
+# balance; 'other' is reported by the rebuild and left out until it is classified.
+RECON_CASH_KINDS = ('deposit', 'withdrawal', 'dividend', 'interest', 'tax', 'fee')
+BENCHMARK = 'US.SPY'
+_recon_lock = threading.Lock()
+
+
+def daily_closes(codes: list[str], start: str, end: str) -> pd.DataFrame:
+    """Closing prices (rows: dates, columns: codes) from the daily_close cache, filling gaps from
+    Moomoo's daily K-lines. Codes Moomoo can't price (delisted, options) are left out."""
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute('CREATE TABLE IF NOT EXISTS daily_close (code TEXT NOT NULL, date TEXT NOT NULL, '
+                 'close REAL NOT NULL, PRIMARY KEY (code, date))')
+    have = {c: (lo, hi) for c, lo, hi in conn.execute(
+        'SELECT code, MIN(date), MAX(date) FROM daily_close GROUP BY code')}
+    today = now_et().strftime('%Y-%m-%d')
+    for code in codes:
+        lo, hi = have.get(code, (None, None))
+        # refetch when the cache does not cover the range (the latest day may still be moving)
+        if lo is not None and lo <= start and (hi >= end or hi >= today):
+            continue
+        try:
+            _kline_limiter.acquire()
+            with _quote_lock:
+                result = quote_ctx.request_history_kline(code, start=start, end=end, ktype=KLType.K_DAY,
+                                                         max_count=1000)
+            ret, data = result[0], result[1]
+        except Exception as e:   # a price the broker can't give must not break the page
+            print(f"[closes] {code}: {e}")
+            continue
+        if ret != RET_OK or data is None or not hasattr(data, 'empty') or data.empty:
+            print(f"[closes] {code}: {data if ret != RET_OK else 'no data'}")
+            continue
+        with conn:
+            conn.executemany('INSERT OR REPLACE INTO daily_close (code, date, close) VALUES (?, ?, ?)',
+                             [(code, str(r['time_key'])[:10], float(r['close'])) for _, r in data.iterrows()])
+    rows = pd.read_sql_query(
+        f"SELECT code, date, close FROM daily_close WHERE code IN ({','.join('?' * len(codes))}) "
+        "AND date BETWEEN ? AND ?", conn, params=(*codes, start, end)) if codes else pd.DataFrame()
+    conn.close()
+    if rows.empty:
+        return pd.DataFrame()
+    rows['date'] = pd.to_datetime(rows['date'])
+    return rows.pivot_table(index='date', columns='code', values='close', aggfunc='last')
+
+
+def reconstruct_moomoo_nav() -> dict:
+    """Rebuild Moomoo's daily value before its first after-close snapshot.
+
+    Anchored on the earliest snapshot (its cash-like balance = total assets − market value), the
+    cash balance is walked back day by day — undoing each day's fills (sells add cash, buys and
+    fees take it) and cash flows — while the holdings come from the fills. Value of a day = cash +
+    shares × that day's close. Rows written are marked 'reconstructed'; a snapshot always wins.
+    Returns diagnostics: days written, the lowest cash (a large negative means money flows are
+    missing), unclassified cash flow types, codes without prices."""
+    if not _recon_lock.acquire(blocking=False):
+        return {'status': 'busy'}
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        anchor = conn.execute(
+            "SELECT date, nav, cash FROM account_nav_daily WHERE account = 'MOOMOO' AND source = 'snapshot' "
+            "ORDER BY date LIMIT 1").fetchone()
+        if anchor is None:
+            conn.close()
+            return {'status': 'waiting', 'message': 'needs one after-close snapshot of the Moomoo account first'}
+        d0, nav0, cash0 = pd.Timestamp(anchor[0]), anchor[1], anchor[2]
+        fills = pd.read_sql_query(
+            "SELECT code, trd_side, price, qty, fee, create_time FROM trades WHERE account = 'MOOMOO'", conn)
+        flows = pd.read_sql_query(
+            "SELECT date, amount_usd, kind, description FROM cash_flows WHERE account = 'MOOMOO'", conn)
+        conn.close()
+
+        fills['day'] = pd.to_datetime(fills['create_time'], format='mixed').dt.normalize()
+        fills['mult'] = fills['code'].map(P.multiplier)
+        fills['signed'] = [P.signed_qty(s, q) for s, q in zip(fills['trd_side'], fills['qty'])]
+        fills['cash'] = -fills['signed'] * fills['price'] * fills['mult'] - fills['fee']
+        flows['day'] = pd.to_datetime(flows['date'])
+        counted = flows[flows['kind'].isin(RECON_CASH_KINDS)]
+        unclassified = sorted(set(flows.loc[flows['kind'] == 'other', 'description']))
+
+        start = min(fills['day'].min(), counted['day'].min() if not counted.empty else fills['day'].min())
+        days = pd.bdate_range(start, d0)
+        # cash change per calendar day, then the balance at each close walking back from the anchor
+        delta = pd.concat([fills.groupby('day')['cash'].sum(), counted.groupby('day')['amount_usd'].sum()],
+                          axis=1).fillna(0.0).sum(axis=1)
+        after = {d: float(delta[(delta.index > d) & (delta.index <= d0)].sum()) for d in days}
+        cash = pd.Series({d: cash0 - after[d] for d in days})
+
+        held = (fills.pivot_table(index='day', columns='code', values='signed', aggfunc='sum')
+                .reindex(pd.DatetimeIndex(sorted(set(days) | set(fills['day'])))).fillna(0.0).cumsum()
+                .reindex(days).fillna(0.0))
+        held = held.loc[:, (held.abs() > P.EPS).any()]
+        codes = list(held.columns)
+        closes = daily_closes(codes, start.strftime('%Y-%m-%d'), d0.strftime('%Y-%m-%d'))
+        closes = closes.reindex(days).ffill() if not closes.empty else pd.DataFrame(index=days)
+        # a code without a K-line is valued at its own fill prices, carried forward
+        last_fill = (fills.pivot_table(index='day', columns='code', values='price', aggfunc='last')
+                     .reindex(pd.DatetimeIndex(sorted(set(days) | set(fills['day'])))).ffill().reindex(days))
+        unpriced = [c for c in codes if c not in closes.columns]
+        for c in codes:
+            series = closes[c] if c in closes.columns else pd.Series(index=days, dtype=float)
+            closes[c] = series.fillna(last_fill[c]) if c in last_fill.columns else series
+        mult = pd.Series({c: P.multiplier(c) for c in codes})
+        stock = (held[codes] * closes[codes] * mult).sum(axis=1) if codes else pd.Series(0.0, index=days)
+        nav = cash + stock
+
+        rows = [(d.strftime('%Y-%m-%d'), float(nav[d]), float(cash[d]), float(stock[d]))
+                for d in days if d < d0 and nav[d] > 0]
+        conn = sqlite3.connect(DB_FILE)
+        with conn:
+            conn.execute("DELETE FROM account_nav_daily WHERE account = 'MOOMOO' AND source = 'reconstructed'")
+            conn.executemany(
+                """INSERT INTO account_nav_daily (account, date, nav, cash, stock, flow, source)
+                   VALUES ('MOOMOO', ?, ?, ?, ?, 0, 'reconstructed')
+                   ON CONFLICT(account, date) DO NOTHING""", rows)
+        conn.close()
+        refresh_moomoo_nav_flows()
+        check = float(nav[d0]) if d0 in nav.index else None
+        result = {
+            'status': 'ok', 'days': len(rows), 'from': rows[0][0] if rows else None,
+            'anchor': {'date': anchor[0], 'actual': round(nav0, 2),
+                       'rebuilt': round(check, 2) if check is not None else None},
+            'min_cash': round(float(cash.min()), 2), 'min_cash_day': cash.idxmin().strftime('%Y-%m-%d'),
+            'unclassified_flows': unclassified, 'unpriced_codes': unpriced,
+        }
+        set_status('moomoo_rebuild', True, json.dumps(result)[:500])
+        print(f"[assets] Moomoo history rebuilt: {result}")
+        return result
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        set_status('moomoo_rebuild', False, f'failed: {e}')
+        return {'status': 'error', 'message': str(e)}
+    finally:
+        _recon_lock.release()
+
+
+def _load_flows() -> list:
+    import portfolio as PF
+    conn = sqlite3.connect(DB_FILE)
+    rows = conn.execute('SELECT id, account, date, amount_usd, kind, label, pair_id FROM cash_flows').fetchall()
+    conn.close()
+    return [PF.Flow(i, a, pd.Timestamp(d), amt, k, l or '', p) for i, a, d, amt, k, l, p in rows]
+
+
+def _pair_new_transfers(flows: list) -> list:
+    """Persist newly found transfer pairs and return the flows with them applied."""
+    import portfolio as PF
+    pairs = PF.pair_transfers(flows)
+    if pairs:
+        conn = sqlite3.connect(DB_FILE)
+        with conn:
+            conn.executemany('UPDATE cash_flows SET pair_id = ? WHERE id = ?', [(p, i) for i, p in pairs.items()])
+        conn.close()
+        for f in flows:
+            if f.id in pairs:
+                f.pair_id = pairs[f.id]
+    return flows
+
+
+ASSET_RANGES = {'1M': pd.DateOffset(months=1), '3M': pd.DateOffset(months=3), '1Y': pd.DateOffset(years=1)}
+
+
+@app.route('/api/assets', methods=['GET'])
+def get_assets():
+    """Account value over time across accounts (or one with ?account=): value per account, net
+    contributions, P&L, time-weighted return against SPY, drawdown, monthly returns, the money
+    in and out, and where the numbers come from."""
+    import portfolio as PF
+    rng = request.args.get('range', 'ALL').upper()
+    account = request.args.get('account') or None
+
+    conn = sqlite3.connect(DB_FILE)
+    nav = pd.read_sql_query('SELECT account, date, nav, flow, source FROM account_nav_daily', conn)
+    acc_rows = conn.execute('SELECT account, label FROM accounts').fetchall()
+    sources = pd.read_sql_query(
+        'SELECT account, source, MIN(date) AS first, MAX(date) AS last, COUNT(*) AS days '
+        'FROM account_nav_daily WHERE nav > 0 GROUP BY account, source', conn)
+    conn.close()
+    labels = dict(acc_rows)
+    flows = _pair_new_transfers(_load_flows())
+
+    chosen = [account] if account else sorted(nav.loc[nav['nav'] > 0, 'account'].unique())
+    full = PF.build_series(nav, flows, chosen)
+    if full.empty:
+        return jsonify({'status': 'empty', 'accounts': [], 'sources': get_statuses()}), 200
+
+    end = full.index[-1]
+    start = None if rng == 'ALL' else (pd.Timestamp(year=end.year, month=1, day=1) if rng == 'YTD'
+                                       else end - ASSET_RANGES.get(rng, pd.DateOffset(years=100)))
+    part = PF.window(full, start)
+
+    spy = daily_closes([BENCHMARK], part.index[0].strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d'))
+    spy = spy[BENCHMARK].reindex(part.index).ffill() if BENCHMARK in spy else pd.Series(dtype=float)
+    spy_pct = (spy / spy.dropna().iloc[0] - 1) * 100 if spy.notna().any() else None
+
+    value_cols = [c for c in part.columns if c.startswith('value:')]
+    series = [{
+        'date': d.strftime('%Y-%m-%d'),
+        'total': round(float(r['total']), 2),
+        'contributed': round(float(r['contributed']), 2),
+        'pnl': round(float(r['pnl']), 2),
+        'twr_pct': round((float(r['twr']) - 1) * 100, 3),
+        'drawdown_pct': round(float(r['drawdown']) * 100, 3),
+        'spy_pct': None if spy_pct is None or pd.isna(spy_pct.get(d)) else round(float(spy_pct[d]), 3),
+        'values': {c[6:]: round(float(r[c]), 2) for c in value_cols},
+        'transit': round(float(r['transit']), 2),
+    } for d, r in part.iterrows()]
+
+    year_start = pd.Timestamp(year=end.year, month=1, day=1)
+    month_start = pd.Timestamp(year=end.year, month=end.month, day=1)
+    kpis = {
+        'value': round(float(full['total'].iloc[-1]), 2),
+        'as_of': end.strftime('%Y-%m-%d'),
+        'twr_pct': round((float(part['twr'].iloc[-1]) - 1) * 100, 2),
+        'pnl': round(float(part['pnl'].iloc[-1]), 2),
+        'mtd_pct': round(PF.period_return(full, month_start) * 100, 2) if PF.period_return(full, month_start) is not None else None,
+        'ytd_pct': round(PF.period_return(full, year_start) * 100, 2) if PF.period_return(full, year_start) is not None else None,
+        'inception_pct': round((float(full['twr'].iloc[-1]) - 1) * 100, 2),
+        'inception': full.index[0].strftime('%Y-%m-%d'),
+        'max_drawdown_pct': round(float(part['drawdown'].min()) * 100, 2),
+        'drawdown_pct': round(float(part['drawdown'].iloc[-1]) * 100, 2),
+        'spy_pct': None if spy_pct is None or spy_pct.dropna().empty else round(float(spy_pct.dropna().iloc[-1]), 2),
+    }
+
+    flow_rows = sorted(
+        ({'id': f.id, 'account': f.account, 'account_label': labels.get(f.account, f.account),
+          'date': f.date.strftime('%Y-%m-%d'), 'amount': round(f.amount, 2), 'kind': f.kind,
+          'label': f.label, 'pair_id': f.pair_id}
+         for f in flows if f.account in chosen and f.kind in ('deposit', 'withdrawal')
+         and (start is None or f.date >= start)),
+        key=lambda x: x['date'], reverse=True)
+    income = {}
+    for f in flows:
+        if f.account in chosen and f.kind in ('dividend', 'interest', 'tax', 'fee') and (start is None or f.date >= start):
+            income[f.kind] = round(income.get(f.kind, 0.0) + f.amount, 2)
+
+    return jsonify({
+        'status': 'success',
+        'range': rng,
+        'accounts': [{
+            'account': a, 'label': labels.get(a, a),
+            'value': round(float(full[f'value:{a}'].iloc[-1]), 2) if f'value:{a}' in full else None,
+            'sources': [{'source': s.source, 'first': s.first, 'last': s.last, 'days': int(s.days)}
+                        for s in sources[sources['account'] == a].itertuples()],
+        } for a in chosen],
+        'all_accounts': [{'account': a, 'label': l} for a, l in acc_rows],
+        'kpis': kpis,
+        'series': series,
+        'monthly': PF.monthly_returns(full),
+        'breakdown': PF.breakdown(part, flows, chosen),
+        'flows': flow_rows,
+        'income': income,
+        'sources': get_statuses(),
+    }), 200
+
+
+@app.route('/api/cash_flows/<int:flow_id>', methods=['PATCH'])
+def update_cash_flow(flow_id: int):
+    """Label what a withdrawal was for, or fix a transfer pairing: pair_id = the other leg's id,
+    -1 = not a transfer between own accounts, null = let the automatic matching decide."""
+    body = request.get_json(force=True) or {}
+    conn = sqlite3.connect(DB_FILE)
+    with conn:
+        row = conn.execute('SELECT pair_id FROM cash_flows WHERE id = ?', (flow_id,)).fetchone()
+        if row is None:
+            conn.close()
+            return jsonify({'status': 'error', 'message': 'cash flow not found'}), 404
+        if 'label' in body:
+            conn.execute('UPDATE cash_flows SET label = ? WHERE id = ?', (str(body['label']).strip()[:40], flow_id))
+        if 'pair_id' in body:
+            new = body['pair_id']
+            old = row[0]
+            if old and old > 0:   # the previous partner is released too
+                conn.execute('UPDATE cash_flows SET pair_id = ? WHERE id = ?', (-1 if new == -1 else None, old))
+            if new is None or new == -1:
+                conn.execute('UPDATE cash_flows SET pair_id = ? WHERE id = ?', (new, flow_id))
+            else:
+                conn.execute('UPDATE cash_flows SET pair_id = ? WHERE id = ?', (int(new), flow_id))
+                conn.execute('UPDATE cash_flows SET pair_id = ? WHERE id = ?', (flow_id, int(new)))
+    conn.close()
+    return jsonify({'status': 'success'}), 200
+
+
+@app.route('/api/assets/rebuild', methods=['POST'])
+def rebuild_assets():
+    """Rebuild Moomoo's daily value history (runs in the background; result in /api/accounts)."""
+    threading.Thread(target=reconstruct_moomoo_nav, daemon=True).start()
+    return jsonify({'status': 'started'}), 202
 
 
 if __name__ == '__main__':

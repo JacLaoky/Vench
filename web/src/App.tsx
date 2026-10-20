@@ -11,14 +11,18 @@ import Calendar from './pages/Calendar'
 import Calculator from './pages/Calculator'
 import TagStats from './pages/TagStats'
 import Recap from './pages/Recap'
+import Assets from './pages/Assets'
 import JournalAI from './components/JournalAI'
+import ScopeProvider from './components/ScopeProvider'
 
 export default function App() {
   return (
     <BrowserRouter>
+      <ScopeProvider>
       <Layout>
         <Routes>
           <Route path="/" element={<Dashboard />} />
+          <Route path="/assets" element={<Assets />} />
           <Route path="/journal" element={<Journal />} />
           <Route path="/all-trades" element={<AllTrades />} />
           <Route path="/stats" element={<Stats />} />
@@ -32,6 +36,7 @@ export default function App() {
         </Routes>
         <JournalAI />
       </Layout>
+      </ScopeProvider>
     </BrowserRouter>
   )
 }

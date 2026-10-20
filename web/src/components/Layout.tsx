@@ -2,14 +2,16 @@ import { useState } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import {
   LayoutDashboard, BookOpen, BarChart2, TrendingUp,
-  Calendar, Activity, List, Calculator, RefreshCw, Waves, Menu, X, Tags, RotateCw, Table2,
+  Calendar, Activity, List, Calculator, RefreshCw, Waves, Menu, X, Tags, RotateCw, Table2, Wallet,
 } from 'lucide-react'
 import { api } from '../api'
 import { useBuildCheck } from '../lib/useBuildCheck'
+import ScopeSwitch from './ScopeSwitch'
 
 const groups = [
   { title: 'Overview', items: [
     { to: '/',            label: 'Dashboard',   icon: LayoutDashboard },
+    { to: '/assets',      label: 'Assets',      icon: Wallet },
   ] },
   { title: 'Review', items: [
     { to: '/journal',     label: 'Journal',     icon: BookOpen },
@@ -31,6 +33,8 @@ const groups = [
   ] },
 ]
 const allItems = groups.flatMap(g => g.items)
+// Pages whose numbers follow the Swing / Long-term / All switch
+const SCOPED = ['/journal', '/all-trades', '/performance', '/stats', '/tags']
 
 function Brand() {
   return (
@@ -107,6 +111,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const { pathname } = useLocation()
   useBuildCheck()
   const current = allItems.find(n => (n.to === '/' ? pathname === '/' : pathname.startsWith(n.to)))
+  const scoped = SCOPED.some(p => pathname.startsWith(p))
 
   return (
     <div className="flex min-h-screen">
@@ -143,7 +148,14 @@ export default function Layout({ children }: { children: React.ReactNode }) {
         </header>
 
         <main className="flex-1 overflow-auto px-4 py-5 sm:px-8 sm:py-7 pb-[calc(5rem+env(safe-area-inset-bottom))] md:pb-8">
-          <div className="max-w-[1400px] mx-auto">{children}</div>
+          <div className="max-w-[1400px] mx-auto">
+            {scoped && (
+              <div className="flex justify-end mb-3">
+                <ScopeSwitch className="w-full sm:w-auto" />
+              </div>
+            )}
+            {children}
+          </div>
         </main>
       </div>
     </div>

@@ -3,6 +3,8 @@
 A position (cycle) for a ticker starts when its running quantity leaves zero and ends when it
 returns to zero — long or short, with any number of scale-ins and partial exits in between.
 Its id is the order_id of its first fill, so ids never shift when older fills arrive late.
+Positions are kept per account: the same ticker held at two brokers is two positions (a fill's
+`account` column, MOOMOO when absent).
 
 `resets` is a set of order_ids after which the broker reports the position flat even though the
 order history leaves a small residue (e.g. a fractional share moved outside of orders). The
@@ -26,13 +28,20 @@ def signed_qty(side: str, qty: float) -> float:
     return qty if side in LONG_SIDES else -qty
 
 
+def _books(df: pd.DataFrame) -> pd.Series:
+    """The running-position key of every fill: account and ticker."""
+    account = df['account'].fillna('MOOMOO') if 'account' in df else pd.Series('MOOMOO', index=df.index)
+    return account.astype(str) + '|' + df['code'].astype(str)
+
+
 def assign_cycles(df: pd.DataFrame, resets=frozenset()) -> pd.Series:
     """position_id for every fill. df needs order_id, code, trd_side, qty, create_time."""
     ids = pd.Series(index=df.index, dtype=object)
     running: dict[str, float] = {}
     current: dict[str, str] = {}
+    books = _books(df)
     for idx, row in df.sort_values(['create_time', 'order_id']).iterrows():
-        code = row['code']
+        code = books[idx]
         prev = running.get(code, 0.0)
         new = prev + signed_qty(row['trd_side'], float(row['qty']))
         if abs(new) < EPS or str(row['order_id']) in resets:
@@ -50,11 +59,12 @@ def realized_pnl(df: pd.DataFrame, resets=frozenset()) -> pd.DataFrame:
     """
     df = df.sort_values(['create_time', 'order_id']).copy()
     book: dict[str, dict] = {}
+    books = _books(df)
     pnl = []
-    for _, row in df.iterrows():
+    for idx, row in df.iterrows():
         code, price, qty = row['code'], float(row['price']), float(row['qty'])
         mult = multiplier(code)
-        pos = book.setdefault(code, {'qty': 0.0, 'avg': 0.0})
+        pos = book.setdefault(books[idx], {'qty': 0.0, 'avg': 0.0})
         delta = signed_qty(row['trd_side'], qty)
         realized = 0.0
         if pos['qty'] == 0 or (pos['qty'] > 0) == (delta > 0):
@@ -97,6 +107,7 @@ def summarize(df: pd.DataFrame, resets=frozenset()) -> pd.DataFrame:
         rows.append({
             'position_id': pid,
             'code': code,
+            'account': str(grp['account'].iloc[0]) if 'account' in grp else 'MOOMOO',
             'direction': 'LONG' if is_long else 'SHORT',
             'status': 'closed' if closed else 'open',
             'entry_qty': entry_qty,

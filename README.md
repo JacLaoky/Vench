@@ -11,7 +11,9 @@ Personal trading journal and analytics platform with a Flask REST API and a Reac
 ## Features
 
 - **Position engine** — every fill belongs to a position (from flat back to flat): longs, shorts, scale-ins and partial exits; stable position ids; P&L net of every fee; fills dated by fill time
-- **Dashboard** — live positions with cost basis, market value and P&L; drill into a position's fills and set its stop
+- **Dashboard** — live positions across Moomoo and IBKR with cost basis, market value and P&L; drill into a position's fills and set its stop
+- **Assets** — end-of-day value of every account (IBKR from Flex statements, Moomoo from after-close snapshots, earlier Moomoo days rebuilt from fills, cash flows and closing prices); time-weighted return against SPY, drawdown, monthly returns, and where the value went (deposits, withdrawals by purpose, investment P&L). Transfers between own accounts are matched so they don't count as money in or out
+- **Swing / Long-term / All** — every review page can count the swing strategy (the default), long-term holdings, or both, so holdings without a stop don't skew win rate and R
 - **Journal** — daily and monthly review with trade notes, daily notes, screenshots and tags; initial vs current stop per position
 - **R multiples** — the first stop of a position is locked as its initial stop and defines 1R; R per trade, expectancy in R and an R distribution
 - **Stats** — cumulative P&L chart, last-7-days bar chart, win rate and profit factor per closed position
@@ -115,7 +117,7 @@ All secrets and environment-specific values are loaded from `.env` files, which 
 |------|-----------|
 | `backend/.env` | `MOOMOO_PWD`, `MOOMOO_ACC_ID`, `MOOMOO_HOST`, `MOOMOO_PORT`, `DEEPSEEK_API_KEY` (optional, enables Journal AI) |
 | `web/.env` | `VITE_API_URL` (dev proxy target only) |
-| Optional backend env | `VENCH_HOST` / `VENCH_PORT` (default `127.0.0.1:5001`), `CORS_ORIGINS` (default `http://localhost:5173`), `VENCH_WEB_DIST`, `RAG_IDLE_UNLOAD_SECS` (default 600) |
+| Optional backend env | `VENCH_HOST` / `VENCH_PORT` (default `127.0.0.1:5001`), `CORS_ORIGINS` (default `http://localhost:5173`), `VENCH_WEB_DIST`, `RAG_IDLE_UNLOAD_SECS` (default 600), `IBKR_FLEX_TOKEN` / `IBKR_FLEX_QUERY_ID` (IBKR Flex Web Service; the query's sections are listed in `backend/ibkr_flex.py`) |
 
 ## License
 
@@ -130,7 +132,9 @@ MIT
 ## 功能
 
 - **仓位引擎** — 每笔成交归属到一个仓位(从空仓到回到空仓)：做多、做空、加仓、部分止盈都正确处理；仓位 ID 稳定；盈亏扣除全部手续费；按成交时间记录
-- **Dashboard** — 实时持仓(成本价、市值、盈亏)，可点开查看仓位的每笔成交并设置止损
+- **Dashboard** — Moomoo 和 IBKR 的实时持仓(成本价、市值、盈亏)，可点开查看仓位的每笔成交并设置止损
+- **Assets** — 每个账户每天的收盘净值(IBKR 来自 Flex 报表，Moomoo 来自收盘后快照，更早的 Moomoo 历史用成交、现金流水和收盘价重建)；时间加权收益对比 SPY、回撤、月度收益，以及资产变化拆解(入金、按用途分类的出金、投资盈亏)。自己账户之间的转账会自动配对，不算资金进出
+- **Swing / Long-term / All** — 各复盘页面可以只看 swing 策略(默认)、只看长线持仓或全部，没有止损的长线持仓不会扭曲胜率和 R
 - **Journal** — 每日/月度复盘，支持交易笔记、每日笔记、截图和标签；每个仓位区分初始止损和当前止损
 - **R 倍数** — 仓位第一次设定的止损锁定为初始止损并定义 1R；每笔交易的 R、R 期望值和 R 分布
 - **Stats** — 累计盈亏曲线、近7日柱状图，胜率和盈亏比按已平仓仓位计算
@@ -233,7 +237,7 @@ Flutter 应用早于 Web 端开发，仅保留作参考；Web 端已覆盖其全
 |------|------|
 | `backend/.env` | `MOOMOO_PWD`、`MOOMOO_ACC_ID`、`MOOMOO_HOST`、`MOOMOO_PORT`、`DEEPSEEK_API_KEY`（可选，启用 Journal AI） |
 | `web/.env` | `VITE_API_URL`（仅开发代理使用） |
-| 可选的后端环境变量 | `VENCH_HOST` / `VENCH_PORT`（默认 `127.0.0.1:5001`）、`CORS_ORIGINS`（默认 `http://localhost:5173`）、`VENCH_WEB_DIST`、`RAG_IDLE_UNLOAD_SECS`（默认 600） |
+| 可选的后端环境变量 | `VENCH_HOST` / `VENCH_PORT`（默认 `127.0.0.1:5001`）、`CORS_ORIGINS`（默认 `http://localhost:5173`）、`VENCH_WEB_DIST`、`RAG_IDLE_UNLOAD_SECS`（默认 600）、`IBKR_FLEX_TOKEN` / `IBKR_FLEX_QUERY_ID`（IBKR Flex Web Service，查询需要的区段见 `backend/ibkr_flex.py`） |
 
 ## 许可证
 

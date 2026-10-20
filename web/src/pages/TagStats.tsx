@@ -1,3 +1,4 @@
+import { useScope } from '../lib/scope'
 import { api } from '../api'
 import { useApi } from '../lib/useApi'
 import { usePersistentState } from '../lib/usePersistentState'
@@ -11,7 +12,8 @@ const winBarColor = (rate: number) => (rate >= 60 ? 'bg-emerald-500' : rate >= 4
 
 export default function TagStats() {
   const [tf, setTf] = usePersistentState<string>('tags.timeframe', 'AT')
-  const { data, error, loading, reload } = useApi(() => api.getTagStats(tf).then(r => r.data ?? []), [tf])
+  const { scope } = useScope()
+  const { data, error, loading, reload } = useApi(() => api.getTagStats(tf, scope).then(r => r.data ?? []), [tf, scope])
 
   return (
     <div>

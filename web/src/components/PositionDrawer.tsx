@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { X } from 'lucide-react'
 import { api } from '../api'
 import { useApi } from '../lib/useApi'
@@ -5,16 +6,30 @@ import { fmtR, pnlColor, rColor, signedUsd, usd } from '../lib/format'
 import type { Position } from '../types'
 import StopEditor from './StopEditor'
 
-export default function PositionDrawer({ position, weightPct = null, onClose, onStopSaved }: {
+export default function PositionDrawer({ position, weightPct = null, onClose, onStopSaved, onStrategySaved }: {
   position: Position
   /** Share of total assets, % */
   weightPct?: number | null
   onClose: () => void
   onStopSaved: (stop: number) => void
+  onStrategySaved?: (strategy: 'swing' | 'long') => void
 }) {
   const { data, error, loading, reload } = useApi(
-    () => api.getHolding(position.ticker, position.position_id ?? undefined), [position.ticker],
+    () => api.getHolding(position.ticker, position.position_id ?? undefined, position.account),
+    [position.ticker, position.account],
   )
+  const [saving, setSaving] = useState(false)
+
+  async function setStrategy(strategy: 'swing' | 'long') {
+    if (!position.position_id || strategy === position.strategy) return
+    setSaving(true)
+    try {
+      await api.setStrategy(position.position_id, strategy)
+      onStrategySaved?.(strategy)
+    } finally {
+      setSaving(false)
+    }
+  }
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end">
@@ -31,6 +46,10 @@ export default function PositionDrawer({ position, weightPct = null, onClose, on
               Market value {usd(position.market_val)}{weightPct !== null && <> · {weightPct.toFixed(1)}% of total assets</>}
             </p>
             <p className={`text-xs ${pnlColor(position.today_pl_val)}`}>Today {signedUsd(position.today_pl_val)}</p>
+            <p className="text-xs text-slate-500">
+              {position.account_label ?? position.account}
+              {position.as_of && <> · shares as of {position.as_of}{position.priced === 'close' && ', priced at that close'}</>}
+            </p>
           </div>
           <button onClick={onClose} className="text-slate-400 hover:text-white" aria-label="Close"><X size={18} /></button>
         </div>
@@ -52,6 +71,21 @@ export default function PositionDrawer({ position, weightPct = null, onClose, on
               <p className={`text-sm font-semibold ${rColor(data?.r_multiple)}`}>{data ? fmtR(data.r_multiple) : '…'}</p>
             </div>
           </div>
+
+          {position.position_id && (
+            <section>
+              <h3 className="label-caps mb-2">Counts as</h3>
+              <div className="flex gap-0.5 bg-white/[0.03] border border-line rounded-lg p-0.5 w-fit">
+                {([['swing', 'Swing trade'], ['long', 'Long-term holding']] as const).map(([id, label]) => (
+                  <button key={id} disabled={saving} onClick={() => setStrategy(id)}
+                    className={`px-3 py-1 rounded-md text-xs transition-colors disabled:opacity-60 ${position.strategy === id ? 'bg-violet-600 text-white' : 'text-slate-400 hover:text-white'}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1.5">Long-term holdings stay out of win rate, R and the swing journal.</p>
+            </section>
+          )}
 
           {position.position_id ? (
             <section>

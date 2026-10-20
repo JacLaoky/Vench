@@ -1,3 +1,4 @@
+import { useScope } from '../lib/scope'
 import { useMemo, useState } from 'react'
 import { Search, X } from 'lucide-react'
 import { api } from '../api'
@@ -23,7 +24,8 @@ function SortBtn({ active, asc, label, onClick }: { active: boolean; asc: boolea
 }
 
 export default function AllTrades() {
-  const { data, setData, error, loading, reload } = useApi(() => api.getAllTrades().then(d => d.data ?? []), [])
+  const { scope } = useScope()
+  const { data, setData, error, loading, reload } = useApi(() => api.getAllTrades(scope).then(d => d.data ?? []), [scope])
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
   const [tag, setTag] = useState('')
