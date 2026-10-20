@@ -1334,13 +1334,23 @@ def sync_moomoo_cash_flows(max_days: int | None = None) -> int:
         day = (datetime.strptime(cursor['message'], '%Y-%m-%d') - timedelta(days=3)
                if cursor else datetime.strptime(MOOMOO_FLOWS_FROM, '%Y-%m-%d'))
         today = now_et().to_pydatetime()
-        read = 0
+        read, failed_in_a_row, skipped = 0, 0, []
         while day.date() <= today.date() and (max_days is None or read < max_days):
             date = day.strftime('%Y-%m-%d')
             ret, data = trd_ctx.get_acc_cash_flow(clearing_date=date, trd_env=TRD_ENV, acc_id=MOOMOO_ACC_ID)
+            if ret != RET_OK:   # rate limit or a day the account can't report: wait, retry once, then skip it
+                _time.sleep(30)
+                ret, data = trd_ctx.get_acc_cash_flow(clearing_date=date, trd_env=TRD_ENV, acc_id=MOOMOO_ACC_ID)
             if ret != RET_OK:
-                set_status('moomoo_cash_flow', False, f'{date}: {data}')
-                return read
+                failed_in_a_row += 1
+                skipped.append(date)
+                print(f"[moomoo_cash_flow] {date} skipped: {data}")
+                if failed_in_a_row >= 10:
+                    set_status('moomoo_cash_flow', False, f'stopped at {date} after 10 failed days: {data}')
+                    return read
+                day += timedelta(days=1)
+                continue
+            failed_in_a_row = 0
             if not data.empty:
                 conn = sqlite3.connect(DB_FILE)
                 with conn:
@@ -1360,7 +1370,8 @@ def sync_moomoo_cash_flows(max_days: int | None = None) -> int:
             day += timedelta(days=1)
             _time.sleep(1.6)   # stay well inside the trade API's request rate limit
         refresh_moomoo_nav_flows()
-        set_status('moomoo_cash_flow', True, f'read through {min(day, today).strftime("%Y-%m-%d")}')
+        note = f'; {len(skipped)} days unreadable, first {skipped[0]}' if skipped else ''
+        set_status('moomoo_cash_flow', True, f'read through {min(day, today).strftime("%Y-%m-%d")}{note}')
         reconstruct_moomoo_nav()
         return read
     except Exception as e:
