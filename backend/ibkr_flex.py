@@ -21,8 +21,11 @@ import requests
 BASE_URL = "https://ndcdyn.interactivebrokers.com/AccountManagement/FlexWebService"
 _HEADERS = {"User-Agent": "Vench/1.0"}   # the Flex service rejects requests without a User-Agent
 _IN_PROGRESS = "1019"                    # "Statement generation in progress. Please try again shortly."
-# "Statement could not be generated at this time" / "Too many requests": IBKR is busy, try later
+# "Statement could not be generated at this time" / "Too many requests": IBKR is busy. Retried once,
+# a minute later — every failed request counts towards IBKR's lockout (1025 "Too many failed
+# attempts"), so a busy service must not be hammered
 _RETRY_LATER = {"1001", "1018"}
+LOCKED_OUT = "1025"
 
 
 class FlexError(RuntimeError):
@@ -41,14 +44,14 @@ def fetch_statement(token: str, query_id: str, from_date: str | None = None, to_
     params = {"t": token, "q": query_id, "v": 3}
     if from_date and to_date:
         params.update(fd=from_date, td=to_date)
-    for attempt in range(5):
+    for attempt in range(2):
         resp = requests.get(f"{BASE_URL}/SendRequest", params=params, headers=_HEADERS, timeout=30)
         resp.raise_for_status()
         root = ET.fromstring(resp.content)
         code = root.findtext("ErrorCode") or "?"
-        if root.findtext("Status") == "Success" or code not in _RETRY_LATER or attempt == 4:
+        if root.findtext("Status") == "Success" or code not in _RETRY_LATER or attempt == 1:
             break
-        time.sleep(30)
+        time.sleep(60)
     if root.findtext("Status") != "Success":
         raise FlexError(code, root.findtext("ErrorMessage") or "request refused")
     reference = root.findtext("ReferenceCode")
@@ -63,7 +66,7 @@ def fetch_statement(token: str, query_id: str, from_date: str | None = None, to_
             return resp.content
         status = ET.fromstring(resp.content)
         code = status.findtext("ErrorCode") or "?"
-        if code not in {_IN_PROGRESS, *_RETRY_LATER} or time.time() > deadline:
+        if code != _IN_PROGRESS or time.time() > deadline:
             raise FlexError(code, status.findtext("ErrorMessage") or "statement not available")
 
 

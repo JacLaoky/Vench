@@ -1227,6 +1227,7 @@ FLEX_REFRESH_SECS  = 3 * 3600       # a statement changes once a day: the 07:00,
 FLEX_ARCHIVE_DIR   = 'ibkr_flex'    # raw statements, kept FLEX_ARCHIVE_DAYS for debugging
 FLEX_ARCHIVE_DAYS  = 7
 FLEX_RECENT_DAYS   = 45             # routine fetches cover this many days; the history is already stored
+FLEX_LOCKOUT_PAUSE_SECS = 6 * 3600  # after IBKR's "too many failed attempts", stay away this long
 _flex_lock = threading.Lock()
 
 
@@ -1244,8 +1245,11 @@ def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
         set_status('ibkr_flex', False, 'not configured (IBKR_FLEX_TOKEN / IBKR_FLEX_QUERY_ID)')
         return
     last = get_statuses().get('ibkr_flex')
-    if (not force and last and last['ok']
-            and (datetime.now() - datetime.fromisoformat(last['at'])).total_seconds() < FLEX_REFRESH_SECS):
+    age = (datetime.now() - datetime.fromisoformat(last['at'])).total_seconds() if last else None
+    if not force and last and last['ok'] and age < FLEX_REFRESH_SECS:
+        return
+    # IBKR locks the token out after too many failed requests; asking again only prolongs it
+    if last and not last['ok'] and f"Flex error {ibkr_flex.LOCKED_OUT}" in last['message'] and age < FLEX_LOCKOUT_PAUSE_SECS:
         return
     try:
         today = now_et()
