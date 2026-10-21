@@ -3691,6 +3691,16 @@ def ibkr_fills_since_statement(conn) -> list:
         "WHERE account LIKE 'IBKR:%' ORDER BY create_time") if days.get(r[0]) and r[6] > days[r[0]]]
 
 
+def _today_pnl(qty: float, last: float, prev: float | None, fills: list) -> float:
+    """Today's P&L of a holding: value now − value at yesterday's close − cash spent on today's buys
+    + cash from today's sells. Shares bought today count from their fill price, not from yesterday's
+    close (AMD bought at 549.77 and now 547.54 is −2.23 today, whatever it did since yesterday)."""
+    start = qty - sum(q for q, _ in fills)
+    if start and not prev:
+        return 0.0
+    return qty * last - start * (prev or 0.0) - sum(q * p for q, p in fills)
+
+
 def ibkr_holdings() -> list[dict]:
     """IBKR open positions priced live, shaped like /api/portfolio rows: each account's holdings at
     its latest statement, moved by the fills since (today's swing fills come from the trading
@@ -3700,6 +3710,12 @@ def ibkr_holdings() -> list[dict]:
         'SELECT account, code, report_date, qty, cost_price, mark_price, side FROM ibkr_positions'
     ).fetchall()
     later = ibkr_fills_since_statement(conn)
+    today = now_et().strftime('%Y-%m-%d')
+    traded_today: dict = {}   # (account, code) -> [(signed qty, price)] of today's fills
+    for account, code, side, qty, price in conn.execute(
+            "SELECT account, code, trd_side, qty, price FROM trades "
+            "WHERE account LIKE 'IBKR:%' AND substr(create_time, 1, 10) = ?", (today,)):
+        traded_today.setdefault((account, code), []).append((qty if side in P.LONG_SIDES else -qty, price))
     conn.close()
     book = {(r[0], r[1]): list(r) for r in rows}
     for account, code, side, qty, price, fee, day in later:
@@ -3723,7 +3739,7 @@ def ibkr_holdings() -> list[dict]:
             'cost_price': round(cost, 4), 'market_val': round(qty * last, 2),
             'pl_val': round(pnl, 2),
             'pl_ratio': round(pnl / abs(cost * qty) * 100, 4) if cost and qty else 0.0,
-            'today_pl_val': round((last - prev) * qty, 2) if prev else 0.0,
+            'today_pl_val': round(_today_pnl(qty, last, prev, traded_today.get((account, code), [])), 2),
             'side': side, 'account': account,
             # the share count is as of this statement day; the price is live when it could be quoted
             'as_of': day, 'priced': 'live' if code in quotes else 'close',
