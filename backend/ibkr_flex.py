@@ -150,6 +150,8 @@ def parse_statement(xml: bytes) -> dict:
                 "account": account,
                 "date": _day(a.get("reportDate") or a.get("dateTime")),
                 "amount_usd": round(amount, 2),
+                "amount": _f(a.get("amount")),
+                "currency": a.get("currency", "USD"),
                 "kind": kind,
                 "description": a.get("description", ""),
                 "external_id": "IB-" + a["transactionID"],

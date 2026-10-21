@@ -292,6 +292,10 @@ def init_db():
             pair_id      INTEGER
         )
     ''')
+    # original currency and amount (amount_usd is converted at that day's rate)
+    _add_column_if_missing(conn, 'cash_flows', 'currency', "TEXT NOT NULL DEFAULT 'USD'")
+    _add_column_if_missing(conn, 'cash_flows', 'amount', 'REAL')
+
     # IBKR open positions as of the latest statement day (live quotes are applied on read)
     conn.execute('''
         CREATE TABLE IF NOT EXISTS ibkr_positions (
@@ -317,6 +321,14 @@ def init_db():
             at          TEXT NOT NULL
         )
     ''')
+    # daily_close rows written before 'adjusted' existed hold adjusted prices under the plain code;
+    # drop them once so share values use the prices that actually traded
+    conn.execute('CREATE TABLE IF NOT EXISTS daily_close (code TEXT NOT NULL, date TEXT NOT NULL, '
+                 'close REAL NOT NULL, PRIMARY KEY (code, date))')
+    if not conn.execute("SELECT 1 FROM sync_status WHERE source = 'daily_close_unadjusted'").fetchone():
+        conn.execute("DELETE FROM daily_close WHERE code LIKE 'US.%'")
+        conn.execute("INSERT INTO sync_status (source, ok, message, at) VALUES ('daily_close_unadjusted', 1, "
+                     "'adjusted closes cleared', datetime('now'))")
 
     conn.execute('''
         CREATE TABLE IF NOT EXISTS position_stops (
@@ -1267,12 +1279,13 @@ def import_ibkr_flex(force: bool = False) -> None:
                   n['flow'] or 0.0, n['broker_twr']) for n in data['nav']],
             )
             conn.executemany(
-                """INSERT INTO cash_flows (account, date, amount_usd, kind, description, external_id)
-                   VALUES (?, ?, ?, ?, ?, ?)
+                """INSERT INTO cash_flows (account, date, amount_usd, amount, currency, kind, description, external_id)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(external_id) DO UPDATE SET account = excluded.account, date = excluded.date,
-                       amount_usd = excluded.amount_usd, kind = excluded.kind, description = excluded.description""",
-                [(ibkr_account(c['account']), c['date'], c['amount_usd'], c['kind'], c['description'],
-                  c['external_id']) for c in data['cash_flows']],
+                       amount_usd = excluded.amount_usd, amount = excluded.amount, currency = excluded.currency,
+                       kind = excluded.kind, description = excluded.description""",
+                [(ibkr_account(c['account']), c['date'], c['amount_usd'], c['amount'], c['currency'], c['kind'],
+                  c['description'], c['external_id']) for c in data['cash_flows']],
             )
             for acc in data['accounts']:
                 conn.execute('DELETE FROM ibkr_positions WHERE account = ?', (ibkr_account(acc),))
@@ -1313,14 +1326,81 @@ MOOMOO_FLOWS_FROM = '2025-01-01'   # before the account's first fills (November 
 _moomoo_flow_lock = threading.Lock()
 
 
-def _moomoo_flow_kind(cashflow_type: str) -> str:
+def _moomoo_flow_kind(cashflow_type: str, amount: float = 0.0) -> str:
+    """deposit / withdrawal (money in or out of the account), fx (converting between the account's
+    own currencies), fund (the idle-cash sweep into the money-market fund), dividend, interest,
+    tax, fee, other."""
     t = cashflow_type.lower()
+    if 'exchange' in t:
+        return 'fx'
+    if 'stock yield' in t:   # securities lending income
+        return 'interest'
     for word, kind in (('deposit', 'deposit'), ('withdraw', 'withdrawal'), ('dividend', 'dividend'),
                        ('coupon', 'interest'), ('interest', 'interest'), ('tax', 'tax'),
                        ('fund', 'fund'), ('fee', 'fee')):
         if word in t:
             return kind
+    if t.startswith('others'):   # money that arrived or left through another channel
+        return 'deposit' if amount >= 0 else 'withdrawal'
     return 'other'
+
+
+def usd_per_unit(currency: str, start: str, end: str) -> pd.Series:
+    """USD value of one unit of a currency on each business day (daily close of <CUR>=X from
+    Yahoo, cached in daily_close as FX.<CUR>; days without a quote take the last one)."""
+    days = pd.bdate_range(start, end)
+    if currency == 'USD':
+        return pd.Series(1.0, index=days)
+    code = f'FX.{currency}'
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute('CREATE TABLE IF NOT EXISTS daily_close (code TEXT NOT NULL, date TEXT NOT NULL, '
+                 'close REAL NOT NULL, PRIMARY KEY (code, date))')
+    lo, hi = conn.execute('SELECT MIN(date), MAX(date) FROM daily_close WHERE code = ?', (code,)).fetchone()
+    if lo is None or lo > start or hi < min(end, (now_et() - pd.Timedelta(days=3)).strftime('%Y-%m-%d')):
+        try:
+            import yfinance as yf
+            data = yf.download(f'{currency}=X', start=(pd.Timestamp(start) - pd.Timedelta(days=7)).strftime('%Y-%m-%d'),
+                               end=(pd.Timestamp(end) + pd.Timedelta(days=1)).strftime('%Y-%m-%d'),
+                               progress=False, auto_adjust=False)
+            closes = data['Close'].squeeze().dropna()
+            with conn:
+                conn.executemany('INSERT OR REPLACE INTO daily_close (code, date, close) VALUES (?, ?, ?)',
+                                 [(code, d.strftime('%Y-%m-%d'), float(v)) for d, v in closes.items()])
+        except Exception as e:
+            print(f"[fx] {currency}: {e}")
+    rows = conn.execute('SELECT date, close FROM daily_close WHERE code = ? ORDER BY date', (code,)).fetchall()
+    conn.close()
+    if not rows:
+        raise RuntimeError(f'no exchange rate for {currency}')
+    per_usd = pd.Series({pd.Timestamp(d): v for d, v in rows})
+    return (1.0 / per_usd).reindex(per_usd.index.union(days)).ffill().bfill().reindex(days)
+
+
+def normalize_moomoo_flows() -> None:
+    """Give every Moomoo cash flow its currency, original amount, kind and USD value (rows read
+    before multi-currency support stored the original amount in amount_usd)."""
+    conn = sqlite3.connect(DB_FILE)
+    rows = conn.execute("SELECT id, date, amount_usd, amount, description FROM cash_flows WHERE account = 'MOOMOO'").fetchall()
+    conn.close()
+    if not rows:
+        return
+    parsed = []
+    for fid, date, amount_usd, amount, desc in rows:
+        base, cur = desc, 'USD'
+        if desc.endswith(')') and ' (' in desc:
+            base, cur = desc[:-1].rsplit(' (', 1)
+        parsed.append((fid, date, amount if amount is not None else amount_usd, base, cur))
+    start = (pd.Timestamp(min(p[1] for p in parsed)) - pd.Timedelta(days=7)).strftime('%Y-%m-%d')
+    end = max(p[1] for p in parsed)
+    rates = {cur: usd_per_unit(cur, start, end) for cur in {p[4] for p in parsed}}
+    updates = []
+    for fid, date, amount, base, cur in parsed:
+        rate = rates[cur].asof(pd.Timestamp(date))
+        updates.append((cur, amount, round(amount * float(rate), 2), _moomoo_flow_kind(base, amount), fid))
+    conn = sqlite3.connect(DB_FILE)
+    with conn:
+        conn.executemany('UPDATE cash_flows SET currency = ?, amount = ?, amount_usd = ?, kind = ? WHERE id = ?', updates)
+    conn.close()
 
 
 def sync_moomoo_cash_flows(max_days: int | None = None) -> int:
@@ -1355,11 +1435,12 @@ def sync_moomoo_cash_flows(max_days: int | None = None) -> int:
                 conn = sqlite3.connect(DB_FILE)
                 with conn:
                     conn.executemany(
-                        """INSERT INTO cash_flows (account, date, amount_usd, kind, description, external_id)
-                           VALUES ('MOOMOO', ?, ?, ?, ?, ?)
-                           ON CONFLICT(external_id) DO UPDATE SET amount_usd = excluded.amount_usd,
-                               kind = excluded.kind, description = excluded.description""",
-                        [(date, float(r['cashflow_amount']), _moomoo_flow_kind(str(r['cashflow_type'])),
+                        """INSERT INTO cash_flows (account, date, amount_usd, amount, currency, kind, description, external_id)
+                           VALUES ('MOOMOO', ?, ?, ?, ?, ?, ?, ?)
+                           ON CONFLICT(external_id) DO UPDATE SET amount = excluded.amount,
+                               currency = excluded.currency, description = excluded.description""",
+                        [(date, float(r['cashflow_amount']), float(r['cashflow_amount']), str(r['currency']),
+                          _moomoo_flow_kind(str(r['cashflow_type']), float(r['cashflow_amount'])),
                           f"{r['cashflow_type']} ({r['currency']})" if r['currency'] != 'USD' else str(r['cashflow_type']),
                           f"MM-{date}-{r['cashflow_id']}-{r['cashflow_type']}")
                          for _, r in data.iterrows()],
@@ -1369,6 +1450,7 @@ def sync_moomoo_cash_flows(max_days: int | None = None) -> int:
             read += 1
             day += timedelta(days=1)
             _time.sleep(1.6)   # stay well inside the trade API's request rate limit
+        normalize_moomoo_flows()
         refresh_moomoo_nav_flows()
         note = f'; {len(skipped)} days unreadable, first {skipped[0]}' if skipped else ''
         set_status('moomoo_cash_flow', True, f'read through {min(day, today).strftime("%Y-%m-%d")}{note}')
@@ -1414,9 +1496,14 @@ def record_moomoo_snapshot() -> None:
     date = now.strftime('%Y-%m-%d')
     conn = sqlite3.connect(DB_FILE)
     with conn:
+        # the first snapshot after the close is the day's close; a later one (20:30, after-hours
+        # prices) doesn't replace it
         conn.execute(
-            """INSERT OR REPLACE INTO account_nav_daily (account, date, nav, cash, stock, flow, source)
-               VALUES ('MOOMOO', ?, ?, ?, ?, 0, 'snapshot')""",
+            """INSERT INTO account_nav_daily (account, date, nav, cash, stock, flow, source)
+               VALUES ('MOOMOO', ?, ?, ?, ?, 0, 'snapshot')
+               ON CONFLICT(account, date) DO UPDATE SET nav = excluded.nav, cash = excluded.cash,
+                   stock = excluded.stock, source = 'snapshot'
+               WHERE account_nav_daily.source != 'snapshot'""",
             (date, total, cash, stock),
         )
     conn.close()
@@ -3546,9 +3633,15 @@ BENCHMARK = 'US.SPY'
 _recon_lock = threading.Lock()
 
 
-def daily_closes(codes: list[str], start: str, end: str) -> pd.DataFrame:
+def daily_closes(codes: list[str], start: str, end: str, adjusted: bool = False) -> pd.DataFrame:
     """Closing prices (rows: dates, columns: codes) from the daily_close cache, filling gaps from
-    Moomoo's daily K-lines. Codes Moomoo can't price (delisted, options) are left out."""
+    Moomoo's daily K-lines. Codes Moomoo can't price (delisted, options) are left out.
+
+    adjusted=False: the prices that actually traded that day — what shares held then were worth
+    (adjusted prices rewrite the past for later splits: ASST's 2025 price became 20× its trade).
+    adjusted=True: prices adjusted for dividends and splits, cached as ADJ.<code> — a total-return
+    series for comparing with a benchmark."""
+    keys = {c: (f'ADJ.{c}' if adjusted else c) for c in codes}
     conn = sqlite3.connect(DB_FILE)
     conn.execute('CREATE TABLE IF NOT EXISTS daily_close (code TEXT NOT NULL, date TEXT NOT NULL, '
                  'close REAL NOT NULL, PRIMARY KEY (code, date))')
@@ -3556,16 +3649,22 @@ def daily_closes(codes: list[str], start: str, end: str) -> pd.DataFrame:
         'SELECT code, MIN(date), MAX(date) FROM daily_close GROUP BY code')}
     today = now_et().strftime('%Y-%m-%d')
     for code in codes:
-        lo, hi = have.get(code, (None, None))
+        lo, hi = have.get(keys[code], (None, None))
         # refetch when the cache does not cover the range (the latest day may still be moving)
         if lo is not None and lo <= start and (hi >= end or hi >= today):
             continue
         try:
-            _kline_limiter.acquire()
-            with _quote_lock:
-                result = quote_ctx.request_history_kline(code, start=start, end=end, ktype=KLType.K_DAY,
-                                                         max_count=1000)
-            ret, data = result[0], result[1]
+            for attempt in range(2):
+                _kline_limiter.acquire()
+                with _quote_lock:
+                    result = quote_ctx.request_history_kline(code, start=start, end=end, ktype=KLType.K_DAY,
+                                                             autype=AuType.QFQ if adjusted else AuType.NONE,
+                                                             max_count=1000)
+                ret, data = result[0], result[1]
+                # the limit is shared with every other client of the same OpenD: wait out the window
+                if ret == RET_OK or 'too frequent' not in str(data) or attempt:
+                    break
+                _time.sleep(31)
         except Exception as e:   # a price the broker can't give must not break the page
             print(f"[closes] {code}: {e}")
             continue
@@ -3574,13 +3673,14 @@ def daily_closes(codes: list[str], start: str, end: str) -> pd.DataFrame:
             continue
         with conn:
             conn.executemany('INSERT OR REPLACE INTO daily_close (code, date, close) VALUES (?, ?, ?)',
-                             [(code, str(r['time_key'])[:10], float(r['close'])) for _, r in data.iterrows()])
+                             [(keys[code], str(r['time_key'])[:10], float(r['close'])) for _, r in data.iterrows()])
     rows = pd.read_sql_query(
         f"SELECT code, date, close FROM daily_close WHERE code IN ({','.join('?' * len(codes))}) "
-        "AND date BETWEEN ? AND ?", conn, params=(*codes, start, end)) if codes else pd.DataFrame()
+        "AND date BETWEEN ? AND ?", conn, params=(*keys.values(), start, end)) if codes else pd.DataFrame()
     conn.close()
     if rows.empty:
         return pd.DataFrame()
+    rows['code'] = rows['code'].str.replace('ADJ.', '', regex=False)
     rows['date'] = pd.to_datetime(rows['date'])
     return rows.pivot_table(index='date', columns='code', values='close', aggfunc='last')
 
@@ -3588,15 +3688,19 @@ def daily_closes(codes: list[str], start: str, end: str) -> pd.DataFrame:
 def reconstruct_moomoo_nav() -> dict:
     """Rebuild Moomoo's daily value before its first after-close snapshot.
 
-    Anchored on the earliest snapshot (its cash-like balance = total assets − market value), the
-    cash balance is walked back day by day — undoing each day's fills (sells add cash, buys and
-    fees take it) and cash flows — while the holdings come from the fills. Value of a day = cash +
-    shares × that day's close. Rows written are marked 'reconstructed'; a snapshot always wins.
-    Returns diagnostics: days written, the lowest cash (a large negative means money flows are
-    missing), unclassified cash flow types, codes without prices."""
+    Cash runs forward from zero per currency: USD through each day's fills (sells add cash, buys
+    and fees take it) and USD cash flows; other currencies (SGD) through their own flows, valued at
+    that day's exchange rate. Currency exchanges move money between the two. The earliest after-
+    close snapshot anchors the end: its cash-like balance (total assets − market value) minus the
+    forward USD cash is income no statement line shows (the money-market fund's growth), spread
+    evenly over the period. Holdings come from the fills (residues the broker reset are closed).
+    Value of a day = cash + shares × that day's close. Rows are marked 'reconstructed'; a snapshot
+    always wins. Returns diagnostics: days written, lowest cash (a large negative means money flows
+    are missing), the unexplained USD, unclassified cash flow types, codes without prices."""
     if not _recon_lock.acquire(blocking=False):
         return {'status': 'busy'}
     try:
+        normalize_moomoo_flows()
         conn = sqlite3.connect(DB_FILE)
         anchor = conn.execute(
             "SELECT date, nav, cash FROM account_nav_daily WHERE account = 'MOOMOO' AND source = 'snapshot' "
@@ -3606,26 +3710,67 @@ def reconstruct_moomoo_nav() -> dict:
             return {'status': 'waiting', 'message': 'needs one after-close snapshot of the Moomoo account first'}
         d0, nav0, cash0 = pd.Timestamp(anchor[0]), anchor[1], anchor[2]
         fills = pd.read_sql_query(
-            "SELECT code, trd_side, price, qty, fee, create_time FROM trades WHERE account = 'MOOMOO'", conn)
+            "SELECT order_id, code, trd_side, price, qty, fee, create_time FROM trades WHERE account = 'MOOMOO'", conn)
         flows = pd.read_sql_query(
-            "SELECT date, amount_usd, kind, description FROM cash_flows WHERE account = 'MOOMOO'", conn)
+            "SELECT date, amount, amount_usd, currency, kind, description FROM cash_flows WHERE account = 'MOOMOO'", conn)
+        resets = load_resets(conn)
         conn.close()
 
-        fills['day'] = pd.to_datetime(fills['create_time'], format='mixed').dt.normalize()
+        fills['time'] = pd.to_datetime(fills['create_time'], format='mixed')
+        fills = fills.sort_values(['time', 'order_id']).reset_index(drop=True)
+        fills['day'] = fills['time'].dt.normalize()
         fills['mult'] = fills['code'].map(P.multiplier)
         fills['signed'] = [P.signed_qty(s, q) for s, q in zip(fills['trd_side'], fills['qty'])]
         fills['cash'] = -fills['signed'] * fills['price'] * fills['mult'] - fills['fee']
+        # after a reset order the broker shows the ticker flat (a fractional residue moved outside
+        # of orders): close the residue there, at no cash, like the position engine does
+        running, extra = {}, []
+        for r in fills.itertuples():
+            running[r.code] = running.get(r.code, 0.0) + r.signed
+            if r.order_id in resets and abs(running[r.code]) > P.EPS:
+                extra.append({'code': r.code, 'day': r.day, 'signed': -running[r.code], 'price': r.price,
+                              'cash': 0.0, 'mult': r.mult})
+                running[r.code] = 0.0
+        if extra:
+            fills = pd.concat([fills, pd.DataFrame(extra)], ignore_index=True)
+
         flows['day'] = pd.to_datetime(flows['date'])
-        counted = flows[flows['kind'].isin(RECON_CASH_KINDS)]
+        flows['amount'] = flows['amount'].fillna(flows['amount_usd'])
+        # fx legs move money between the account's own currencies, so they count per currency
+        counted = flows[flows['kind'].isin(RECON_CASH_KINDS + ('fx',))]
         unclassified = sorted(set(flows.loc[flows['kind'] == 'other', 'description']))
 
         start = min(fills['day'].min(), counted['day'].min() if not counted.empty else fills['day'].min())
         days = pd.bdate_range(start, d0)
-        # cash change per calendar day, then the balance at each close walking back from the anchor
-        delta = pd.concat([fills.groupby('day')['cash'].sum(), counted.groupby('day')['amount_usd'].sum()],
+
+        def running_total(by_day: pd.Series) -> pd.Series:
+            """Cumulative sum through each business day (weekend entries land on the next one)."""
+            idx = pd.DatetimeIndex(sorted(set(days) | set(by_day.index)))
+            return by_day.reindex(idx).fillna(0.0).cumsum().reindex(days)
+
+        # Other currencies (SGD): no fills settle in them, so their balance runs forward from zero
+        # and is valued at each day's exchange rate
+        other_value = pd.Series(0.0, index=days)
+        other_end = {}
+        for cur, g in counted[counted['currency'] != 'USD'].groupby('currency'):
+            balance = running_total(g.groupby('day')['amount'].sum())
+            other_value += balance * usd_per_unit(cur, start.strftime('%Y-%m-%d'), d0.strftime('%Y-%m-%d')).reindex(days)
+            other_end[cur] = round(float(balance.iloc[-1]), 2)
+
+        # USD cash runs forward from zero (before the first deposit there was nothing) through the
+        # day's fills and USD flows. The anchor's actual USD cash differs from that by what the
+        # statements never show as a cash flow — mostly the money-market fund's own growth (the
+        # sweep's subscriptions and redemptions are left out on purpose) — so that difference is
+        # spread evenly over the period, like interest accruing, and the anchor matches exactly.
+        usd = counted[counted['currency'] == 'USD']
+        usd_cash0 = cash0 - float(other_value.iloc[-1])
+        delta = pd.concat([fills.groupby('day')['cash'].sum(), usd.groupby('day')['amount'].sum()],
                           axis=1).fillna(0.0).sum(axis=1)
-        after = {d: float(delta[(delta.index > d) & (delta.index <= d0)].sum()) for d in days}
-        cash = pd.Series({d: cash0 - after[d] for d in days})
+        forward = running_total(delta)
+        unexplained = usd_cash0 - float(forward.iloc[-1])
+        span = (d0 - days[0]).days or 1
+        usd_cash = forward + unexplained * pd.Series([(d - days[0]).days / span for d in days], index=days)
+        cash = usd_cash + other_value
 
         held = (fills.pivot_table(index='day', columns='code', values='signed', aggfunc='sum')
                 .reindex(pd.DatetimeIndex(sorted(set(days) | set(fills['day'])))).fillna(0.0).cumsum()
@@ -3662,6 +3807,9 @@ def reconstruct_moomoo_nav() -> dict:
             'anchor': {'date': anchor[0], 'actual': round(nav0, 2),
                        'rebuilt': round(check, 2) if check is not None else None},
             'min_cash': round(float(cash.min()), 2), 'min_cash_day': cash.idxmin().strftime('%Y-%m-%d'),
+            'min_usd_cash': round(float(usd_cash.min()), 2),
+            'other_currency_balance_at_anchor': other_end,
+            'unexplained_usd': round(unexplained, 2),
             'unclassified_flows': unclassified, 'unpriced_codes': unpriced,
         }
         set_status('moomoo_rebuild', True, json.dumps(result)[:500])
@@ -3730,7 +3878,7 @@ def get_assets():
                                        else end - ASSET_RANGES.get(rng, pd.DateOffset(years=100)))
     part = PF.window(full, start)
 
-    spy = daily_closes([BENCHMARK], part.index[0].strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d'))
+    spy = daily_closes([BENCHMARK], part.index[0].strftime('%Y-%m-%d'), end.strftime('%Y-%m-%d'), adjusted=True)
     spy = spy[BENCHMARK].reindex(part.index).ffill() if BENCHMARK in spy else pd.Series(dtype=float)
     spy_pct = (spy / spy.dropna().iloc[0] - 1) * 100 if spy.notna().any() else None
 
