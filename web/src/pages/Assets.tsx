@@ -12,7 +12,7 @@ import type { AssetFlow, AssetsResponse } from '../types'
 
 const RANGES = ['1M', '3M', 'YTD', '1Y', 'ALL'] as const
 const ACCOUNT_COLORS = ['#a79bfb', '#5ec4f0', '#3fd49a', '#f5b85b', '#f47a7a']
-const LABELS = ['Tuition', 'Living costs', 'Transfer out', 'Other']
+const LABELS = ['Tuition', 'Rent', 'Living costs', 'Transfer out', 'Other']
 
 const tooltipStyle = {
   contentStyle: { background: '#1b2030', border: '1px solid rgba(255,255,255,0.12)', borderRadius: 8, fontSize: 12 },

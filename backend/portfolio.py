@@ -46,12 +46,12 @@ def pair_transfers(flows: list[Flow]) -> dict[int, int]:
 
     taken = {f.id for f in flows if f.pair_id is not None}
     out: dict[int, int] = {}
-    withdrawals = [f for f in flows if f.kind == 'withdrawal' and f.id not in taken]
+    withdrawals = [f for f in flows if f.kind == 'withdrawal' and f.amount < 0 and f.id not in taken]
 
     def close_enough(total: float, target: float) -> bool:
         return abs(total - target) <= TRANSFER_TOLERANCE * target
 
-    for d in sorted((f for f in flows if f.kind == 'deposit' and f.id not in taken), key=lambda f: f.date):
+    for d in sorted((f for f in flows if f.kind == 'deposit' and f.amount > 0 and f.id not in taken), key=lambda f: f.date):
         pool = [w for w in withdrawals if w.id not in out and w.account != d.account
                 and -2 <= (d.date - w.date).days <= TRANSFER_WINDOW_DAYS]
         singles = [w for w in pool if close_enough(abs(w.amount), d.amount)]

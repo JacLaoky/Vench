@@ -1223,9 +1223,10 @@ def _after_import() -> None:
 # Flex Queries → Flex Web Service); the query and its sections are described in ibkr_flex.py.
 IBKR_FLEX_TOKEN    = os.environ.get('IBKR_FLEX_TOKEN', '')
 IBKR_FLEX_QUERY_ID = os.environ.get('IBKR_FLEX_QUERY_ID', '')
-FLEX_REFRESH_SECS  = 6 * 3600       # a statement only changes once a day; don't ask more often
+FLEX_REFRESH_SECS  = 3 * 3600       # a statement changes once a day: the 07:00, 16:30 and 20:30 ET syncs each fetch it
 FLEX_ARCHIVE_DIR   = 'ibkr_flex'    # raw statements, kept FLEX_ARCHIVE_DAYS for debugging
 FLEX_ARCHIVE_DAYS  = 7
+FLEX_RECENT_DAYS   = 45             # routine fetches cover this many days; the history is already stored
 _flex_lock = threading.Lock()
 
 
@@ -1233,9 +1234,11 @@ def ibkr_account(account_id: str) -> str:
     return f'IBKR:{account_id}'
 
 
-def import_ibkr_flex(force: bool = False) -> None:
+def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
     """Fetch the Flex statement and upsert fills, daily NAV, cash flows and open positions.
-    Safe to repeat: every row is keyed by IBKR's own ids or by account and day."""
+    Safe to repeat: every row is keyed by IBKR's own ids or by account and day. Routine fetches
+    cover the last FLEX_RECENT_DAYS; full=True asks for the query's whole period (a first import,
+    or a new account's history)."""
     import ibkr_flex
     if not (IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_ID):
         set_status('ibkr_flex', False, 'not configured (IBKR_FLEX_TOKEN / IBKR_FLEX_QUERY_ID)')
@@ -1245,7 +1248,16 @@ def import_ibkr_flex(force: bool = False) -> None:
             and (datetime.now() - datetime.fromisoformat(last['at'])).total_seconds() < FLEX_REFRESH_SECS):
         return
     try:
-        xml = ibkr_flex.fetch_statement(IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID)
+        today = now_et()
+        conn = sqlite3.connect(DB_FILE)
+        has_history = conn.execute("SELECT 1 FROM account_nav_daily WHERE account LIKE 'IBKR:%' LIMIT 1").fetchone()
+        conn.close()
+        if full or not has_history:
+            xml = ibkr_flex.fetch_statement(IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID)
+        else:
+            xml = ibkr_flex.fetch_statement(IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID,
+                                            (today - pd.Timedelta(days=FLEX_RECENT_DAYS)).strftime('%Y%m%d'),
+                                            today.strftime('%Y%m%d'))
         os.makedirs(FLEX_ARCHIVE_DIR, mode=0o700, exist_ok=True)
         path = os.path.join(FLEX_ARCHIVE_DIR, datetime.now().strftime('%Y%m%d-%H%M%S.xml'))
         with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'wb') as f:
@@ -1278,6 +1290,9 @@ def import_ibkr_flex(force: bool = False) -> None:
                 [(ibkr_account(n['account']), n['date'], n['nav'], n['cash'], n['stock'],
                   n['flow'] or 0.0, n['broker_twr']) for n in data['nav']],
             )
+            # a cancelled withdrawal that was stored before its cancellation came in is dropped with it
+            conn.executemany("DELETE FROM cash_flows WHERE external_id = ?",
+                             [(x,) for x in data.get('dropped_ids', [])])
             conn.executemany(
                 """INSERT INTO cash_flows (account, date, amount_usd, amount, currency, kind, description, external_id)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -1287,15 +1302,19 @@ def import_ibkr_flex(force: bool = False) -> None:
                 [(ibkr_account(c['account']), c['date'], c['amount_usd'], c['amount'], c['currency'], c['kind'],
                   c['description'], c['external_id']) for c in data['cash_flows']],
             )
-            for acc in data['accounts']:
-                conn.execute('DELETE FROM ibkr_positions WHERE account = ?', (ibkr_account(acc),))
-            conn.executemany(
-                """INSERT INTO ibkr_positions (account, code, report_date, qty, cost_price, cost_money,
-                       mark_price, value, unrealized, side) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                [(ibkr_account(p['account']), p['code'], p['report_date'], p['qty'], p['cost_price'],
-                  p['cost_money'], p['mark_price'], p['value'], p['unrealized'], p['side'])
-                 for p in data['positions'] if abs(p['qty']) > P.EPS],
-            )
+            # an account's holdings are replaced only by a statement at least as recent as the
+            # stored one (a statement that stops early must not wipe newer holdings)
+            stored = dict(conn.execute('SELECT account, MAX(report_date) FROM ibkr_positions GROUP BY account'))
+            for acc, day in data['position_days'].items():
+                if day >= (stored.get(ibkr_account(acc)) or ''):
+                    conn.execute('DELETE FROM ibkr_positions WHERE account = ?', (ibkr_account(acc),))
+                    conn.executemany(
+                        """INSERT INTO ibkr_positions (account, code, report_date, qty, cost_price, cost_money,
+                               mark_price, value, unrealized, side) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        [(ibkr_account(p['account']), p['code'], p['report_date'], p['qty'], p['cost_price'],
+                          p['cost_money'], p['mark_price'], p['value'], p['unrealized'], p['side'])
+                         for p in data['positions'] if p['account'] == acc and abs(p['qty']) > P.EPS],
+                    )
         conn.close()
         last_day = max((n['date'] for n in data['nav']), default='—')
         set_status('ibkr_flex', True, f"{len(data['accounts'])} accounts, {len(data['trades'])} orders, "
@@ -1307,13 +1326,13 @@ def import_ibkr_flex(force: bool = False) -> None:
         print(f"[ibkr_flex] fetch failed: {e}")
 
 
-def start_ibkr_flex_import(force: bool = False) -> None:
+def start_ibkr_flex_import(force: bool = False, full: bool = False) -> None:
     """Run the Flex import off the request thread (it polls IBKR for up to a few minutes)."""
     def run():
         if not _flex_lock.acquire(blocking=False):
             return
         try:
-            import_ibkr_flex(force)
+            import_ibkr_flex(force, full)
             with _sync_lock:
                 _after_import()
         finally:
@@ -1820,7 +1839,7 @@ def _run_sync():
             set_status('moomoo_snapshot', False, f'failed: {e}')
         # IBKR statements and Moomoo's cash flow statement are slow to read: they run in the
         # background and rebuild positions themselves when they finish
-        start_ibkr_flex_import(force=request.args.get('flex') == '1')
+        start_ibkr_flex_import(force=request.args.get('flex') in ('1', 'full'), full=request.args.get('flex') == 'full')
         start_moomoo_cash_flows()
         refresh_r_ledger(force=True)
         assign_position_ids()
