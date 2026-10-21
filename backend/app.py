@@ -234,6 +234,15 @@ def init_db():
     _add_column_if_missing(conn, 'trades', 'fee_details', "TEXT NOT NULL DEFAULT '[]'")
     # Which brokerage account a fill belongs to: MOOMOO, or IBKR:<account id>
     _add_column_if_missing(conn, 'trades', 'account', "TEXT NOT NULL DEFAULT 'MOOMOO'")
+    # IBKR fills: execution ids of the order (JSON list), to find the trading system's id for it
+    _add_column_if_missing(conn, 'trades', 'exec_ids', "TEXT NOT NULL DEFAULT ''")
+    # execution id → permId, from the trading system's execution log (see refresh_r_ledger)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ibkr_exec_perm (
+            exec_id  TEXT PRIMARY KEY,
+            perm_id  TEXT NOT NULL
+        )
+    ''')
 
     # Accounts and how their positions count by default: swing (the right-side strategy, the unit
     # of the journal's win rate and R) or long (long-term holdings, kept out of trade statistics).
@@ -787,6 +796,7 @@ def refresh_r_ledger(force: bool = False) -> None:
                 raise RuntimeError(out.stderr.strip()[-300:] or f'ssh exited {out.returncode}')
             ledger_csv, _, rest = out.stdout.partition('\n#POOL\n')
             pool_json, has_stops, stops_tsv = rest.partition('\n#STOPS\n')
+            stops_tsv, has_execs, execs_tsv = stops_tsv.partition('\n#IBEXEC\n')
             rows = list(csv.DictReader(io.StringIO(ledger_csv)))
             if not ledger_csv.startswith('close_date') or (rows and 'position_id' not in rows[0]):
                 raise RuntimeError('unexpected ledger format')
@@ -821,7 +831,17 @@ def refresh_r_ledger(force: bool = False) -> None:
                         [(int(d), oid, sym.upper(), float(stop)) for d, oid, sym, stop in stops],
                     )
                     apply_entry_stops(conn)
+                if has_execs:
+                    pairs = [line.split('\t') for line in execs_tsv.splitlines() if '\t' in line]
+                    conn.executemany('INSERT OR REPLACE INTO ibkr_exec_perm (exec_id, perm_id) VALUES (?, ?)',
+                                     [(e.strip(), p.strip()) for e, p in pairs])
             conn.close()
+            if has_execs and rekey_ibkr_orders():
+                assign_position_ids()
+                conn = sqlite3.connect(DB_FILE)
+                with conn:
+                    apply_entry_stops(conn)
+                conn.close()
             with _cache_lock:
                 _positions_cache = None
                 _card_ctx = None
@@ -1279,14 +1299,20 @@ def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
                     "INSERT OR IGNORE INTO accounts (account, broker, label, default_strategy) VALUES (?, 'IBKR', ?, 'long')",
                     (ibkr_account(acc), f'IBKR …{acc[-2:]}'),
                 )
+            perm = dict(conn.execute('SELECT exec_id, perm_id FROM ibkr_exec_perm'))
+            for t in data['trades']:
+                known = next((perm[e] for e in t['exec_ids'] if e in perm), None)
+                if known:
+                    t['order_id'] = f'IB-{known}'
             conn.executemany(
-                """INSERT INTO trades (order_id, account, code, trd_side, price, qty, create_time, fee, fee_details)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """INSERT INTO trades (order_id, account, code, trd_side, price, qty, create_time, fee, fee_details, exec_ids)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(order_id) DO UPDATE SET account = excluded.account, price = excluded.price,
                        qty = excluded.qty, create_time = excluded.create_time, fee = excluded.fee,
-                       fee_details = excluded.fee_details""",
+                       fee_details = excluded.fee_details, exec_ids = excluded.exec_ids""",
                 [(t['order_id'], ibkr_account(t['account']), t['code'], t['trd_side'], t['price'], t['qty'],
-                  t['create_time'], t['fee'], json.dumps(t['fee_details'])) for t in data['trades']],
+                  t['create_time'], t['fee'], json.dumps(t['fee_details']), json.dumps(t['exec_ids']))
+                 for t in data['trades']],
             )
             conn.executemany(
                 """INSERT OR REPLACE INTO account_nav_daily (account, date, nav, cash, stock, flow, broker_twr, source)
@@ -1320,6 +1346,7 @@ def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
                          for p in data['positions'] if p['account'] == acc and abs(p['qty']) > P.EPS],
                     )
         conn.close()
+        rekey_ibkr_orders()   # rows stored under IBKR's ibOrderID before their permId was known
         last_day = max((n['date'] for n in data['nav']), default='—')
         set_status('ibkr_flex', True, f"{len(data['accounts'])} accounts, {len(data['trades'])} orders, "
                                       f"NAV through {last_day}")
@@ -1328,6 +1355,32 @@ def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
     except Exception as e:
         set_status('ibkr_flex', False, f'fetch failed: {e}')
         print(f"[ibkr_flex] fetch failed: {e}")
+
+
+def rekey_ibkr_orders() -> int:
+    """Rename IBKR fills stored under IBKR's ibOrderID (IB-<ibOrderID>) to the trading system's id for
+    the same order (IB-<permId>) once the execution log maps one of their executions. Entry stops and
+    the R ledger refer to the trading system's ids. Notes and residue resets follow the fill. Returns
+    the number of fills renamed (the caller reassigns position ids)."""
+    conn = sqlite3.connect(DB_FILE)
+    perm = dict(conn.execute('SELECT exec_id, perm_id FROM ibkr_exec_perm'))
+    renames = []
+    for oid, execs in conn.execute("SELECT order_id, exec_ids FROM trades WHERE account LIKE 'IBKR:%' AND exec_ids != ''"):
+        known = next((perm[e] for e in json.loads(execs) if e in perm), None)
+        if known and oid != f'IB-{known}':
+            renames.append((oid, f'IB-{known}'))
+    with conn:
+        for old, new in renames:
+            if conn.execute('SELECT 1 FROM trades WHERE order_id = ?', (new,)).fetchone():
+                conn.execute('DELETE FROM trades WHERE order_id = ?', (old,))   # already stored under the new id
+            else:
+                conn.execute('UPDATE trades SET order_id = ? WHERE order_id = ?', (new, old))
+            conn.execute('UPDATE OR IGNORE trade_notes SET trade_id = ? WHERE trade_id = ?', (new, old))
+            conn.execute('UPDATE OR IGNORE position_resets SET order_id = ? WHERE order_id = ?', (new, old))
+    conn.close()
+    if renames:
+        print(f"[ibkr] {len(renames)} fills renamed to the trading system's order ids")
+    return len(renames)
 
 
 def start_ibkr_flex_import(force: bool = False, full: bool = False) -> None:

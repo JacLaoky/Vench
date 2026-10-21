@@ -213,6 +213,10 @@ def parse_statement(xml: bytes) -> dict:
             "create_time": _when(legs[-1].get("dateTime", "")),
             "fee": round(commission, 4),
             "fee_details": [["IBKR Commission", round(commission, 4)]],
+            "ib_order_id": order_id,
+            # the same execution ids the API reports: they tie this order to the trading system's
+            # own id for it (IB-<permId>)
+            "exec_ids": sorted(l.get("ibExecID", "") for l in legs if l.get("ibExecID")),
         })
 
     # A cancelled withdrawal shows up as the withdrawal, a "CANCELLATION" credit and the re-sent
