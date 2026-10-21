@@ -3959,8 +3959,11 @@ def update_cash_flow(flow_id: int):
         if 'pair_id' in body:
             new = body['pair_id']
             old = row[0]
+            release = -1 if new == -1 else None
             if old and old > 0:   # the previous partner is released too
-                conn.execute('UPDATE cash_flows SET pair_id = ? WHERE id = ?', (-1 if new == -1 else None, old))
+                conn.execute('UPDATE cash_flows SET pair_id = ? WHERE id = ?', (release, old))
+            # and every flow pointing at this one (the other parts of a transfer sent in parts)
+            conn.execute('UPDATE cash_flows SET pair_id = ? WHERE pair_id = ? AND id != ?', (release, flow_id, flow_id))
             if new is None or new == -1:
                 conn.execute('UPDATE cash_flows SET pair_id = ? WHERE id = ?', (new, flow_id))
             else:

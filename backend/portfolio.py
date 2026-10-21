@@ -36,26 +36,40 @@ class Flow:
 
 
 def pair_transfers(flows: list[Flow]) -> dict[int, int]:
-    """Match withdrawals from one account to deposits into another of about the same amount within
-    TRANSFER_WINDOW_DAYS. Flows already paired keep their pair; pair_id −1 means the user said this
-    flow is not a transfer. Returns {flow id: partner id} for new pairs (both directions)."""
+    """Match deposits into one account with withdrawals from another within TRANSFER_WINDOW_DAYS
+    before it (or up to 2 days after) and about the same amount — one withdrawal, or two or three
+    from the same account that add up (money is often sent in parts: $1,142.19 + $7,500 arrived as
+    one $8,642 deposit). Flows already paired keep their pair; pair_id −1 means the user said this
+    flow is not a transfer. Returns {flow id: partner id} for new pairs: every withdrawal points to
+    its deposit, the deposit to the first withdrawal."""
+    from itertools import combinations
+
     taken = {f.id for f in flows if f.pair_id is not None}
     out: dict[int, int] = {}
-    deposits = [f for f in flows if f.kind == 'deposit' and f.id not in taken]
-    for w in sorted((f for f in flows if f.kind == 'withdrawal' and f.id not in taken), key=lambda f: f.date):
-        best = None
-        for d in deposits:
-            if d.id in out or d.account == w.account:
-                continue
-            days = (d.date - w.date).days
-            if not -2 <= days <= TRANSFER_WINDOW_DAYS:
-                continue
-            if abs(d.amount - abs(w.amount)) > TRANSFER_TOLERANCE * abs(w.amount):
-                continue
-            if best is None or abs(days) < abs((best.date - w.date).days):
-                best = d
-        if best is not None:
-            out[w.id], out[best.id] = best.id, w.id
+    withdrawals = [f for f in flows if f.kind == 'withdrawal' and f.id not in taken]
+
+    def close_enough(total: float, target: float) -> bool:
+        return abs(total - target) <= TRANSFER_TOLERANCE * target
+
+    for d in sorted((f for f in flows if f.kind == 'deposit' and f.id not in taken), key=lambda f: f.date):
+        pool = [w for w in withdrawals if w.id not in out and w.account != d.account
+                and -2 <= (d.date - w.date).days <= TRANSFER_WINDOW_DAYS]
+        singles = [w for w in pool if close_enough(abs(w.amount), d.amount)]
+        group = [min(singles, key=lambda w: abs((d.date - w.date).days))] if singles else None
+        for size in (2, 3):
+            if group:
+                break
+            for account in {w.account for w in pool}:
+                same = [w for w in pool if w.account == account]
+                found = next((list(c) for c in combinations(same, size)
+                              if close_enough(sum(abs(w.amount) for w in c), d.amount)), None)
+                if found:
+                    group = found
+                    break
+        if group:
+            out[d.id] = group[0].id
+            for w in group:
+                out[w.id] = d.id
     return out
 
 
