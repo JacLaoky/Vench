@@ -243,6 +243,19 @@ def init_db():
             perm_id  TEXT NOT NULL
         )
     ''')
+    # the trading system's IBKR executions (swing account), for fills newer than the last statement
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ibkr_live_execs (
+            exec_id     TEXT PRIMARY KEY,
+            perm_id     TEXT NOT NULL,
+            symbol      TEXT NOT NULL,
+            side        TEXT NOT NULL,
+            qty         REAL NOT NULL,
+            price       REAL NOT NULL,
+            time        TEXT NOT NULL,
+            commission  REAL
+        )
+    ''')
 
     # Accounts and how their positions count by default: swing (the right-side strategy, the unit
     # of the journal's win rate and R) or long (long-term holdings, kept out of trade statistics).
@@ -832,11 +845,19 @@ def refresh_r_ledger(force: bool = False) -> None:
                     )
                     apply_entry_stops(conn)
                 if has_execs:
-                    pairs = [line.split('\t') for line in execs_tsv.splitlines() if '\t' in line]
+                    lines = [line.split('\t') for line in execs_tsv.splitlines() if '\t' in line]
                     conn.executemany('INSERT OR REPLACE INTO ibkr_exec_perm (exec_id, perm_id) VALUES (?, ?)',
-                                     [(e.strip(), p.strip()) for e, p in pairs])
+                                     [(f[0].strip(), f[1].strip()) for f in lines])
+                    full = [f for f in lines if len(f) >= 8 and f[2] and f[4] and f[5] and f[6]]
+                    if full:
+                        conn.execute('DELETE FROM ibkr_live_execs')
+                        conn.executemany(
+                            'INSERT OR REPLACE INTO ibkr_live_execs (exec_id, perm_id, symbol, side, qty, price, time, commission) '
+                            'VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                            [(f[0], f[1], f[2], f[3], float(f[4]), float(f[5]), f[6][:19],
+                              float(f[7]) if f[7].strip() else None) for f in full])
             conn.close()
-            if has_execs and rekey_ibkr_orders():
+            if has_execs and (rekey_ibkr_orders() + apply_live_ibkr_fills()):
                 assign_position_ids()
                 conn = sqlite3.connect(DB_FILE)
                 with conn:
@@ -1381,6 +1402,58 @@ def rekey_ibkr_orders() -> int:
     if renames:
         print(f"[ibkr] {len(renames)} fills renamed to the trading system's order ids")
     return len(renames)
+
+
+def ibkr_statement_days(conn) -> dict:
+    """The latest statement day of each IBKR account (its holdings and cash are as of that close)."""
+    return dict(conn.execute(
+        "SELECT account, MAX(date) FROM account_nav_daily WHERE account LIKE 'IBKR:%' AND source = 'flex' "
+        "GROUP BY account"))
+
+
+def apply_live_ibkr_fills() -> int:
+    """Store the trading system's IBKR executions that are newer than the swing account's last
+    statement as fills (IB-<permId>, the id the next statement will use and overwrite with IBKR's
+    own figures), so a position opened today shows before tomorrow's statement. The trading system
+    trades the one IBKR account set up as swing. Returns the number of fills added."""
+    conn = sqlite3.connect(DB_FILE)
+    swing = [a for (a,) in conn.execute(
+        "SELECT account FROM accounts WHERE broker = 'IBKR' AND default_strategy = 'swing'")]
+    day = ibkr_statement_days(conn).get(swing[0]) if len(swing) == 1 else None
+    if day is None:
+        conn.close()
+        return 0
+    account = swing[0]
+    legs = conn.execute(
+        'SELECT perm_id, symbol, side, qty, price, time, commission, exec_id FROM ibkr_live_execs '
+        'WHERE substr(time, 1, 10) > ? ORDER BY time', (day,)).fetchall()
+    stored = {oid for (oid,) in conn.execute("SELECT order_id FROM trades WHERE account = ?", (account,))}
+    held = {code: qty for code, qty in conn.execute(
+        'SELECT code, qty FROM ibkr_positions WHERE account = ?', (account,))}
+    orders: dict[str, list] = {}
+    for leg in legs:
+        orders.setdefault(leg[0], []).append(leg)
+    rows = []
+    for perm, ls in sorted(orders.items(), key=lambda kv: kv[1][-1][5]):
+        oid, code = f'IB-{perm}', f'US.{ls[0][1]}'
+        qty = sum(l[3] for l in ls)
+        buy = ls[0][2].upper().startswith('B')
+        running = held.get(code, 0.0)
+        side = ('BUY_BACK' if running < 0 else 'BUY') if buy else ('SELL_SHORT' if running <= 0 else 'SELL')
+        held[code] = running + (qty if buy else -qty)
+        if oid in stored or not qty:
+            continue
+        fee = round(sum(l[6] or 0.0 for l in ls), 4)
+        rows.append((oid, account, code, side, sum(l[3] * l[4] for l in ls) / qty, qty, ls[-1][5], fee,
+                     json.dumps([['IBKR Commission', fee]]), json.dumps(sorted(l[7] for l in ls))))
+    with conn:
+        conn.executemany(
+            """INSERT OR IGNORE INTO trades (order_id, account, code, trd_side, price, qty, create_time, fee,
+                   fee_details, exec_ids) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", rows)
+    conn.close()
+    if rows:
+        print(f"[ibkr] {len(rows)} fills from the trading system ahead of the statement")
+    return len(rows)
 
 
 def start_ibkr_flex_import(force: bool = False, full: bool = False) -> None:
@@ -3557,8 +3630,14 @@ def get_account():
             "  ON n.account = m.account AND n.date = m.d"
         ).fetchall()
         conn.close()
+        conn = sqlite3.connect(DB_FILE)
+        later = ibkr_fills_since_statement(conn)
+        conn.close()
         for acc, cash, day in latest:
-            value = (cash or 0.0) + sum(h['market_val'] for h in holdings if h['account'] == acc)
+            # cash moves with the fills since the statement: buys and fees take it, sells add it
+            cash = (cash or 0.0) - sum((q if s in P.LONG_SIDES else -q) * p + f
+                                       for a, c, s, q, p, f, d in later if a == acc)
+            value = cash + sum(h['market_val'] for h in holdings if h['account'] == acc)
             accounts.append({'account': acc, 'label': labels.get(acc, acc), 'total': round(value, 2), 'as_of': day})
 
         payload = {
@@ -3604,13 +3683,34 @@ def live_quotes(codes: list[str]) -> dict:
     return fresh
 
 
+def ibkr_fills_since_statement(conn) -> list:
+    """IBKR fills after each account's last statement day: (account, code, side, qty, price, fee)."""
+    days = ibkr_statement_days(conn)
+    return [r for r in conn.execute(
+        "SELECT account, code, trd_side, qty, price, fee, substr(create_time, 1, 10) FROM trades "
+        "WHERE account LIKE 'IBKR:%' ORDER BY create_time") if days.get(r[0]) and r[6] > days[r[0]]]
+
+
 def ibkr_holdings() -> list[dict]:
-    """IBKR open positions (as of the latest statement) priced live, shaped like /api/portfolio rows."""
+    """IBKR open positions priced live, shaped like /api/portfolio rows: each account's holdings at
+    its latest statement, moved by the fills since (today's swing fills come from the trading
+    system before IBKR's next statement)."""
     conn = sqlite3.connect(DB_FILE)
     rows = conn.execute(
         'SELECT account, code, report_date, qty, cost_price, mark_price, side FROM ibkr_positions'
     ).fetchall()
+    later = ibkr_fills_since_statement(conn)
     conn.close()
+    book = {(r[0], r[1]): list(r) for r in rows}
+    for account, code, side, qty, price, fee, day in later:
+        row = book.setdefault((account, code), [account, code, day, 0.0, 0.0, price, 'LONG'])
+        held, cost = row[3], row[4] or 0.0
+        delta = qty if side in P.LONG_SIDES else -qty
+        if held == 0 or (held > 0) == (delta > 0):   # opening or adding: average the cost
+            row[4] = (abs(held) * cost + qty * price) / (abs(held) + qty)
+        row[3] = held + delta
+        row[2] = max(row[2], day)
+    rows = [tuple(r[:6]) + ('SHORT' if r[3] < 0 else 'LONG',) for r in book.values() if abs(r[3]) > P.EPS]
     quotes = live_quotes(sorted({r[1] for r in rows})) if rows else {}
     out = []
     for account, code, day, qty, cost, mark, side in rows:
