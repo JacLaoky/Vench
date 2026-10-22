@@ -119,6 +119,36 @@ function MonthlyGrid({ monthly }: { monthly: AssetsResponse['monthly'] }) {
   )
 }
 
+/** Import a Flex statement downloaded from Client Portal (Performance & Reports → Flex Queries → Run,
+ *  XML) — for when IBKR's Web Service is unavailable. */
+function StatementUpload({ onDone }: { onDone: () => void }) {
+  const [msg, setMsg] = useState('')
+  const [busy, setBusy] = useState(false)
+  async function upload(file: File | undefined) {
+    if (!file) return
+    setBusy(true)
+    setMsg('Importing…')
+    try {
+      const res = await api.uploadIbkrStatement(file)
+      setMsg(`Imported: ${res.message}`)
+      onDone()
+    } catch (e) {
+      setMsg((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <p>
+      <label className={`underline cursor-pointer hover:text-slate-300 ${busy ? 'opacity-50 pointer-events-none' : ''}`}>
+        Import an IBKR statement (Flex XML from Client Portal)
+        <input type="file" accept=".xml,text/xml" className="hidden" onChange={e => upload(e.target.files?.[0])} />
+      </label>
+      {msg && <span className="ml-2">{msg}</span>}
+    </p>
+  )
+}
+
 function FlowRow({ f, onSaved }: { f: AssetFlow; onSaved: () => void }) {
   const [saving, setSaving] = useState(false)
   const transfer = f.pair_id !== null && f.pair_id > 0
@@ -313,6 +343,7 @@ export default function Assets() {
           <p key={r.label}>{r.label} from {r.first} to {r.last} is rebuilt from its fills, cash flows and closing prices, not read from the broker.</p>
         ))}
         <p>Return each day = (value − previous value − money in/out) ÷ (previous value + money in/out).</p>
+        <StatementUpload onDone={reload} />
       </div>
     </div>
   )

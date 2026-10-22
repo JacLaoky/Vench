@@ -137,7 +137,13 @@ def parse_statement(xml: bytes) -> dict:
     statement_day: dict[str, str] = {}
     accounts: set[str] = set()
 
-    for _, el in ET.iterparse(io.BytesIO(xml), events=("end",)):
+    statement_of_day = ""
+    transfer_days: set[tuple] = set()
+    for event, el in ET.iterparse(io.BytesIO(xml), events=("start", "end")):
+        if event == "start":
+            if el.tag == "FlexStatement":
+                statement_of_day = _day(el.get("toDate") or el.get("fromDate"))
+            continue
         tag, a = el.tag, el.attrib
         account = a.get("accountId", "")
         if account:
@@ -175,6 +181,24 @@ def parse_statement(xml: bytes) -> dict:
                 "currency": a.get("currency", "USD"),
                 "kind": kind,
                 "description": a.get("description", ""),
+                "external_id": "IB-" + a["transactionID"],
+            }
+
+        elif tag == "Transfer" and _f(a.get("cashTransfer")) and a.get("transactionID"):
+            # cash moved to or from another account (e.g. "TRANSFER FROM U… TO U…", type INTERNAL):
+            # no cash transaction line, counted in Change in NAV's deposits/withdrawals on the
+            # statement day it lands in
+            amount = _f(a.get("cashTransfer")) * _f(a.get("fxRateToBase"), 1.0)
+            day = statement_of_day or _day(a.get("reportDate") or a.get("date"))
+            transfer_days.add((account, day))
+            flows["T" + a["transactionID"]] = {
+                "account": account,
+                "date": day,
+                "amount_usd": round(amount, 2),
+                "amount": _f(a.get("cashTransfer")),
+                "currency": a.get("currency", "USD"),
+                "kind": "deposit" if amount > 0 else "withdrawal",
+                "description": a.get("description", "") or f"{a.get('type', '')} transfer",
                 "external_id": "IB-" + a["transactionID"],
             }
 
@@ -233,6 +257,8 @@ def parse_statement(xml: bytes) -> dict:
     # Cash moved between IBKR accounts has no cash transaction line: ChangeInNAV's internal cash
     # transfers become a withdrawal and a deposit, which the transfer matching then pairs
     for (account, day), amount in internal.items():
+        if (account, day) in transfer_days:
+            continue   # already listed in the Transfers section
         cash_flows.append({
             "account": account, "date": day, "amount_usd": round(amount, 2), "amount": round(amount, 2),
             "currency": "USD", "kind": "deposit" if amount > 0 else "withdrawal",

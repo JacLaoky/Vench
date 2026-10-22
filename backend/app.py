@@ -1285,6 +1285,10 @@ def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
     if not (IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_ID):
         set_status('ibkr_flex', False, 'not configured (IBKR_FLEX_TOKEN / IBKR_FLEX_QUERY_ID)')
         return
+    # automatic fetching switched off (e.g. while IBKR has the Web Service locked); statements
+    # downloaded from Client Portal can still be imported (POST /api/ibkr/statement)
+    if get_statuses().get('ibkr_flex_paused'):
+        return
     last = get_statuses().get('ibkr_flex')
     age = (datetime.now() - datetime.fromisoformat(last['at'])).total_seconds() if last else None
     if not force and last and last['ok'] and age < FLEX_REFRESH_SECS:
@@ -1303,79 +1307,117 @@ def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
             xml = ibkr_flex.fetch_statement(IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID,
                                             (today - pd.Timedelta(days=FLEX_RECENT_DAYS)).strftime('%Y%m%d'),
                                             today.strftime('%Y%m%d'))
-        os.makedirs(FLEX_ARCHIVE_DIR, mode=0o700, exist_ok=True)
-        path = os.path.join(FLEX_ARCHIVE_DIR, datetime.now().strftime('%Y%m%d-%H%M%S.xml'))
-        with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'wb') as f:
-            f.write(xml)
-        for old in os.listdir(FLEX_ARCHIVE_DIR):
-            old_path = os.path.join(FLEX_ARCHIVE_DIR, old)
-            if _time.time() - os.path.getmtime(old_path) > FLEX_ARCHIVE_DAYS * 86400:
-                os.remove(old_path)
-
-        data = ibkr_flex.parse_statement(xml)
-        conn = sqlite3.connect(DB_FILE)
-        with conn:
-            for acc in data['accounts']:
-                conn.execute(
-                    "INSERT OR IGNORE INTO accounts (account, broker, label, default_strategy) VALUES (?, 'IBKR', ?, 'long')",
-                    (ibkr_account(acc), f'IBKR …{acc[-2:]}'),
-                )
-            perm = dict(conn.execute('SELECT exec_id, perm_id FROM ibkr_exec_perm'))
-            for t in data['trades']:
-                known = next((perm[e] for e in t['exec_ids'] if e in perm), None)
-                if known:
-                    t['order_id'] = f'IB-{known}'
-            conn.executemany(
-                """INSERT INTO trades (order_id, account, code, trd_side, price, qty, create_time, fee, fee_details, exec_ids)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(order_id) DO UPDATE SET account = excluded.account, price = excluded.price,
-                       qty = excluded.qty, create_time = excluded.create_time, fee = excluded.fee,
-                       fee_details = excluded.fee_details, exec_ids = excluded.exec_ids""",
-                [(t['order_id'], ibkr_account(t['account']), t['code'], t['trd_side'], t['price'], t['qty'],
-                  t['create_time'], t['fee'], json.dumps(t['fee_details']), json.dumps(t['exec_ids']))
-                 for t in data['trades']],
-            )
-            conn.executemany(
-                """INSERT OR REPLACE INTO account_nav_daily (account, date, nav, cash, stock, flow, broker_twr, source)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, 'flex')""",
-                [(ibkr_account(n['account']), n['date'], n['nav'], n['cash'], n['stock'],
-                  n['flow'] or 0.0, n['broker_twr']) for n in data['nav']],
-            )
-            # a cancelled withdrawal that was stored before its cancellation came in is dropped with it
-            conn.executemany("DELETE FROM cash_flows WHERE external_id = ?",
-                             [(x,) for x in data.get('dropped_ids', [])])
-            conn.executemany(
-                """INSERT INTO cash_flows (account, date, amount_usd, amount, currency, kind, description, external_id)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(external_id) DO UPDATE SET account = excluded.account, date = excluded.date,
-                       amount_usd = excluded.amount_usd, amount = excluded.amount, currency = excluded.currency,
-                       kind = excluded.kind, description = excluded.description""",
-                [(ibkr_account(c['account']), c['date'], c['amount_usd'], c['amount'], c['currency'], c['kind'],
-                  c['description'], c['external_id']) for c in data['cash_flows']],
-            )
-            # an account's holdings are replaced only by a statement at least as recent as the
-            # stored one (a statement that stops early must not wipe newer holdings)
-            stored = dict(conn.execute('SELECT account, MAX(report_date) FROM ibkr_positions GROUP BY account'))
-            for acc, day in data['position_days'].items():
-                if day >= (stored.get(ibkr_account(acc)) or ''):
-                    conn.execute('DELETE FROM ibkr_positions WHERE account = ?', (ibkr_account(acc),))
-                    conn.executemany(
-                        """INSERT INTO ibkr_positions (account, code, report_date, qty, cost_price, cost_money,
-                               mark_price, value, unrealized, side) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        [(ibkr_account(p['account']), p['code'], p['report_date'], p['qty'], p['cost_price'],
-                          p['cost_money'], p['mark_price'], p['value'], p['unrealized'], p['side'])
-                         for p in data['positions'] if p['account'] == acc and abs(p['qty']) > P.EPS],
-                    )
-        conn.close()
-        rekey_ibkr_orders()   # rows stored under IBKR's ibOrderID before their permId was known
-        last_day = max((n['date'] for n in data['nav']), default='—')
-        set_status('ibkr_flex', True, f"{len(data['accounts'])} accounts, {len(data['trades'])} orders, "
-                                      f"NAV through {last_day}")
-        print(f"[ibkr_flex] {len(data['trades'])} orders, {len(data['nav'])} NAV days, "
-              f"{len(data['cash_flows'])} cash flows, {len(data['positions'])} positions")
+        message = store_flex_statement(xml)
+        set_status('ibkr_flex', True, message)
     except Exception as e:
         set_status('ibkr_flex', False, f'fetch failed: {e}')
         print(f"[ibkr_flex] fetch failed: {e}")
+
+
+def store_flex_statement(xml: bytes) -> str:
+    """Archive a Flex statement and upsert its fills, daily NAV, cash flows and open positions.
+    Used by the Web Service fetch and by statements downloaded from Client Portal."""
+    import ibkr_flex
+    data = ibkr_flex.parse_statement(xml)   # parse first: a file that isn't a statement is rejected
+    os.makedirs(FLEX_ARCHIVE_DIR, mode=0o700, exist_ok=True)
+    path = os.path.join(FLEX_ARCHIVE_DIR, datetime.now().strftime('%Y%m%d-%H%M%S.xml'))
+    with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'wb') as f:
+        f.write(xml)
+    for old in os.listdir(FLEX_ARCHIVE_DIR):
+        old_path = os.path.join(FLEX_ARCHIVE_DIR, old)
+        if _time.time() - os.path.getmtime(old_path) > FLEX_ARCHIVE_DAYS * 86400:
+            os.remove(old_path)
+    conn = sqlite3.connect(DB_FILE)
+    with conn:
+        for acc in data['accounts']:
+            conn.execute(
+                "INSERT OR IGNORE INTO accounts (account, broker, label, default_strategy) VALUES (?, 'IBKR', ?, 'long')",
+                (ibkr_account(acc), f'IBKR …{acc[-2:]}'),
+            )
+        perm = dict(conn.execute('SELECT exec_id, perm_id FROM ibkr_exec_perm'))
+        for t in data['trades']:
+            known = next((perm[e] for e in t['exec_ids'] if e in perm), None)
+            if known:
+                t['order_id'] = f'IB-{known}'
+        conn.executemany(
+            """INSERT INTO trades (order_id, account, code, trd_side, price, qty, create_time, fee, fee_details, exec_ids)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(order_id) DO UPDATE SET account = excluded.account, price = excluded.price,
+                   qty = excluded.qty, create_time = excluded.create_time, fee = excluded.fee,
+                   fee_details = excluded.fee_details, exec_ids = excluded.exec_ids""",
+            [(t['order_id'], ibkr_account(t['account']), t['code'], t['trd_side'], t['price'], t['qty'],
+              t['create_time'], t['fee'], json.dumps(t['fee_details']), json.dumps(t['exec_ids']))
+             for t in data['trades']],
+        )
+        conn.executemany(
+            """INSERT OR REPLACE INTO account_nav_daily (account, date, nav, cash, stock, flow, broker_twr, source)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 'flex')""",
+            [(ibkr_account(n['account']), n['date'], n['nav'], n['cash'], n['stock'],
+              n['flow'] or 0.0, n['broker_twr']) for n in data['nav']],
+        )
+        # a cancelled withdrawal that was stored before its cancellation came in is dropped with it
+        conn.executemany("DELETE FROM cash_flows WHERE external_id = ?",
+                         [(x,) for x in data.get('dropped_ids', [])])
+        conn.executemany(
+            """INSERT INTO cash_flows (account, date, amount_usd, amount, currency, kind, description, external_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(external_id) DO UPDATE SET account = excluded.account, date = excluded.date,
+                   amount_usd = excluded.amount_usd, amount = excluded.amount, currency = excluded.currency,
+                   kind = excluded.kind, description = excluded.description""",
+            [(ibkr_account(c['account']), c['date'], c['amount_usd'], c['amount'], c['currency'], c['kind'],
+              c['description'], c['external_id']) for c in data['cash_flows']],
+        )
+        # an account's holdings are replaced only by a statement at least as recent as the
+        # stored one (a statement that stops early must not wipe newer holdings)
+        stored = dict(conn.execute('SELECT account, MAX(report_date) FROM ibkr_positions GROUP BY account'))
+        for acc, day in data['position_days'].items():
+            if day >= (stored.get(ibkr_account(acc)) or ''):
+                conn.execute('DELETE FROM ibkr_positions WHERE account = ?', (ibkr_account(acc),))
+                conn.executemany(
+                    """INSERT INTO ibkr_positions (account, code, report_date, qty, cost_price, cost_money,
+                           mark_price, value, unrealized, side) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    [(ibkr_account(p['account']), p['code'], p['report_date'], p['qty'], p['cost_price'],
+                      p['cost_money'], p['mark_price'], p['value'], p['unrealized'], p['side'])
+                     for p in data['positions'] if p['account'] == acc and abs(p['qty']) > P.EPS],
+                )
+    conn.close()
+    rekey_ibkr_orders()   # rows stored under IBKR's ibOrderID before their permId was known
+    last_day = max((n['date'] for n in data['nav']), default='—')
+    print(f"[ibkr_flex] {len(data['trades'])} orders, {len(data['nav'])} NAV days, "
+          f"{len(data['cash_flows'])} cash flows, {len(data['positions'])} positions")
+    return (f"{len(data['accounts'])} accounts, {len(data['trades'])} orders, NAV through {last_day}")
+
+
+@app.route('/api/ibkr/statement', methods=['POST'])
+def upload_ibkr_statement():
+    """Import a Flex statement (XML) downloaded from Client Portal: the same as a Web Service fetch,
+    for when the service is locked or a gap needs filling."""
+    file = request.files.get('file')
+    if file is None:
+        return jsonify({'status': 'error', 'message': 'attach the statement as "file"'}), 400
+    xml = file.read()
+    if not xml.lstrip().startswith(b'<FlexQueryResponse'):
+        return jsonify({'status': 'error', 'message': 'not a Flex statement (XML)'}), 400
+    with _flex_lock:
+        message = store_flex_statement(xml)
+    with _sync_lock:
+        _after_import()
+    set_status('ibkr_flex_upload', True, message)
+    return jsonify({'status': 'success', 'message': message}), 200
+
+
+@app.route('/api/ibkr/flex', methods=['PATCH'])
+def set_ibkr_flex_fetching():
+    """{"paused": true} stops the automatic Web Service fetches, false resumes them."""
+    paused = bool((request.get_json(force=True) or {}).get('paused'))
+    if paused:
+        set_status('ibkr_flex_paused', True, 'automatic Flex fetching paused')
+    else:
+        conn = sqlite3.connect(DB_FILE)
+        with conn:
+            conn.execute("DELETE FROM sync_status WHERE source IN ('ibkr_flex_paused', 'ibkr_flex')")
+        conn.close()
+    return jsonify({'status': 'success', 'paused': paused}), 200
 
 
 def rekey_ibkr_orders() -> int:

@@ -29,6 +29,12 @@ export const api = {
   updateCashFlow:      (id: number, patch: { label?: string; pair_id?: number | null }) =>
     http.patch(`/cash_flows/${id}`, patch).then(r => r.data),
   rebuildAssets:       () => http.post('/assets/rebuild').then(r => r.data),
+  /** A Flex statement (XML) downloaded from IBKR Client Portal */
+  uploadIbkrStatement: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return http.post<{ message: string }>('/ibkr/statement', form).then(r => r.data)
+  },
   getStats:            (period = 'AT', scope: Scope = 'swing') => get('/stats', { period, scope }),
   getJournal:          (scope: Scope = 'swing') => get<JournalResponse>('/journal', { scope }),
   getAllTrades:        (scope: Scope = 'swing') => get<{ data: Trade[] }>('/all_trades', { scope }),
