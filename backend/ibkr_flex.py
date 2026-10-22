@@ -191,7 +191,8 @@ def parse_statement(xml: bytes) -> dict:
             amount = _f(a.get("cashTransfer")) * _f(a.get("fxRateToBase"), 1.0)
             day = statement_of_day or _day(a.get("reportDate") or a.get("date"))
             transfer_days.add((account, day))
-            flows["T" + a["transactionID"]] = {
+            # both accounts report the transfer under the same transactionID: key it per account
+            flows[f"T{account}-{a['transactionID']}"] = {
                 "account": account,
                 "date": day,
                 "amount_usd": round(amount, 2),
@@ -199,7 +200,7 @@ def parse_statement(xml: bytes) -> dict:
                 "currency": a.get("currency", "USD"),
                 "kind": "deposit" if amount > 0 else "withdrawal",
                 "description": a.get("description", "") or f"{a.get('type', '')} transfer",
-                "external_id": "IB-" + a["transactionID"],
+                "external_id": f"IB-T-{account}-{a['transactionID']}",
             }
 
         elif tag == "OpenPosition" and a.get("assetCategory", "STK") == "STK":
