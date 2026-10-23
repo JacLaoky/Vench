@@ -1794,21 +1794,34 @@ R_BUCKETS = [(-float('inf'), -2, '≤ -2R'), (-2, -1, '-2R ~ -1R'), (-1, 0, '-1R
              (0, 1, '0 ~ 1R'), (1, 2, '1R ~ 2R'), (2, 3, '2R ~ 3R'), (3, float('inf'), '≥ 3R')]
 
 
+# |R| below this is a breakeven exit (stop moved to entry, or a sliver of a trim, then out on
+# fees or slippage): not a verdict on the trade. The trading system's /swing_stats uses the same
+# threshold. Win rate and the average win and loss leave these out; expectancy and total R keep
+# every trade, since the money is real
+BREAKEVEN_R = 0.1
+
+
 def r_stats(rows: pd.DataFrame) -> dict:
     """Expectancy and distribution in standardised R, from the trading system's R ledger."""
     rs = rows['realized_r'].astype(float) if not rows.empty else pd.Series(dtype=float)
-    base = {"source": "R ledger", "ledger": dict(_r_ledger_status), "count": int(len(rs))}
+    base = {"source": "R ledger", "ledger": dict(_r_ledger_status), "count": int(len(rs)),
+            "breakeven_r": BREAKEVEN_R}
     if rs.empty:
         return {**base, "expectancy_r": None, "avg_win_r": None, "avg_loss_r": None,
-                "total_r": None, "win_rate": None, "distribution": []}
-    wins, losses = rs[rs > 0], rs[rs <= 0]
+                "total_r": None, "win_rate": None, "wins": 0, "losses": 0, "breakeven": 0,
+                "distribution": []}
+    wins, losses = rs[rs >= BREAKEVEN_R], rs[rs <= -BREAKEVEN_R]
+    decided = len(wins) + len(losses)
     return {
         **base,
         "expectancy_r": round(float(rs.mean()), 2),
         "avg_win_r":    round(float(wins.mean()), 2) if len(wins) else None,
         "avg_loss_r":   round(float(losses.mean()), 2) if len(losses) else None,
         "total_r":      round(float(rs.sum()), 2),
-        "win_rate":     round(len(wins) / len(rs), 4),
+        "win_rate":     round(len(wins) / decided, 4) if decided else None,
+        "wins":         int(len(wins)),
+        "losses":       int(len(losses)),
+        "breakeven":    int(len(rs) - decided),
         "distribution": [
             {"label": label, "count": int(((rs > lo) & (rs <= hi)).sum()) if lo != -float('inf') else int((rs <= hi).sum())}
             for lo, hi, label in R_BUCKETS

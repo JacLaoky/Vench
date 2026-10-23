@@ -194,13 +194,16 @@ function RSection({ r }: { r: RStats }) {
         <h2 className="text-sm font-medium text-white whitespace-nowrap">R Multiples</h2>
         <span className="text-xs text-slate-500">
           {r.count} trades · standardised 1R ledger{r.win_rate !== null ? ` · ${Math.round(r.win_rate * 100)}% win` : ''}
+          {r.wins !== undefined && ` (${r.wins}W / ${r.losses}L${r.breakeven ? ` / ${r.breakeven} breakeven` : ''})`}
         </span>
       </div>
       {ledgerNote}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 mb-4">
         <MetricCard label="Expectancy" value={fmtR(r.expectancy_r)} color={rColor(r.expectancy_r)} sub="avg R per trade" />
-        <MetricCard label="Avg Win" value={fmtR(r.avg_win_r)} color="text-emerald-400" />
-        <MetricCard label="Avg Loss" value={fmtR(r.avg_loss_r)} color="text-red-400" />
+        <MetricCard label="Avg Win" value={fmtR(r.avg_win_r)} color="text-emerald-400"
+          sub={r.breakeven ? `excl. ${r.breakeven} breakeven (|R| < ${r.breakeven_r})` : undefined} />
+        <MetricCard label="Avg Loss" value={fmtR(r.avg_loss_r)} color="text-red-400"
+          sub={r.breakeven ? `excl. ${r.breakeven} breakeven` : undefined} />
         <MetricCard label="Total" value={fmtR(r.total_r)} color={rColor(r.total_r)} />
       </div>
       <ResponsiveContainer width="100%" height={160}>

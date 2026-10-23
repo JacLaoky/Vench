@@ -56,6 +56,12 @@ export default function MonthDetail({ month, onClose }: { month: JournalMonth; o
               {s.r.count === 0 ? <p className="text-xs text-slate-500">No R-ledger trades closed this month.</p> : (
                 <div className="grid grid-cols-2 gap-2 text-sm">
                   <span className="text-slate-400">Trades</span><span className="text-right text-white">{s.r.count}</span>
+                  {s.r.wins !== undefined && (
+                    <><span className="text-slate-400">W / L / breakeven</span>
+                    <span className="text-right text-white">{s.r.wins} / {s.r.losses} / {s.r.breakeven}</span></>
+                  )}
+                  <span className="text-slate-400">Avg win / loss</span>
+                  <span className="text-right"><span className="text-emerald-400">{fmtR(s.r.avg_win_r)}</span> / <span className="text-red-400">{fmtR(s.r.avg_loss_r)}</span></span>
                   <span className="text-slate-400">Expectancy</span><span className={`text-right ${rColor(s.r.expectancy_r)}`}>{fmtR(s.r.expectancy_r)}</span>
                   <span className="text-slate-400">Total</span><span className={`text-right ${rColor(s.r.total_r)}`}>{fmtR(s.r.total_r)}</span>
                 </div>

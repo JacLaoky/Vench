@@ -102,7 +102,12 @@ export interface RStats {
   avg_win_r: number | null
   avg_loss_r: number | null
   total_r: number | null
+  /** wins ÷ (wins + losses): breakeven exits (|R| < breakeven_r) are left out */
   win_rate: number | null
+  wins?: number
+  losses?: number
+  breakeven?: number
+  breakeven_r?: number
   distribution: { label: string; count: number }[]
 }
 
