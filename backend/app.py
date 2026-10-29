@@ -1264,7 +1264,9 @@ def _after_import() -> None:
 # Flex Queries → Flex Web Service); the query and its sections are described in ibkr_flex.py.
 IBKR_FLEX_TOKEN    = os.environ.get('IBKR_FLEX_TOKEN', '')
 IBKR_FLEX_QUERY_ID = os.environ.get('IBKR_FLEX_QUERY_ID', '')
-FLEX_REFRESH_SECS  = 3 * 3600       # a statement changes once a day: the 07:00, 16:30 and 20:30 ET syncs each fetch it
+FLEX_REFRESH_SECS  = 3 * 3600       # a statement changes once a day
+FLEX_FETCH_FROM_ET = 20             # IBKR answers 1001 ("could not be generated") through the day; only the
+                                    # 20:30 ET sync fetches, the 07:00 and 16:30 ones leave the Web Service alone
 FLEX_ARCHIVE_DIR   = 'ibkr_flex'    # raw statements, kept FLEX_ARCHIVE_DAYS for debugging
 FLEX_ARCHIVE_DAYS  = 7
 FLEX_RECENT_DAYS   = 45             # routine fetches cover this many days; the history is already stored
@@ -1292,6 +1294,8 @@ def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
     last = get_statuses().get('ibkr_flex')
     age = (datetime.now() - datetime.fromisoformat(last['at'])).total_seconds() if last else None
     if not force and last and last['ok'] and age < FLEX_REFRESH_SECS:
+        return
+    if not force and now_et().hour < FLEX_FETCH_FROM_ET:
         return
     # IBKR locks the token out after too many failed requests; asking again only prolongs it
     if last and not last['ok'] and f"Flex error {ibkr_flex.LOCKED_OUT}" in last['message'] and age < FLEX_LOCKOUT_PAUSE_SECS:
