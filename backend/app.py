@@ -1307,16 +1307,18 @@ def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
             xml = ibkr_flex.fetch_statement(IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID,
                                             (today - pd.Timedelta(days=FLEX_RECENT_DAYS)).strftime('%Y%m%d'),
                                             today.strftime('%Y%m%d'))
-        message = store_flex_statement(xml)
-        set_status('ibkr_flex', True, message)
+        message, excluded = store_flex_statement(xml)
+        # a statement missing an account still updates the others, but shows as a warning
+        set_status('ibkr_flex', not excluded, message)
     except Exception as e:
         set_status('ibkr_flex', False, f'fetch failed: {e}')
         print(f"[ibkr_flex] fetch failed: {e}")
 
 
-def store_flex_statement(xml: bytes) -> str:
+def store_flex_statement(xml: bytes) -> tuple[str, list[str]]:
     """Archive a Flex statement and upsert its fills, daily NAV, cash flows and open positions.
-    Used by the Web Service fetch and by statements downloaded from Client Portal."""
+    Used by the Web Service fetch and by statements downloaded from Client Portal. Returns a
+    summary and the accounts IBKR excluded from the statement."""
     import ibkr_flex
     data = ibkr_flex.parse_statement(xml)   # parse first: a file that isn't a statement is rejected
     os.makedirs(FLEX_ARCHIVE_DIR, mode=0o700, exist_ok=True)
@@ -1385,7 +1387,11 @@ def store_flex_statement(xml: bytes) -> str:
     last_day = max((n['date'] for n in data['nav']), default='—')
     print(f"[ibkr_flex] {len(data['trades'])} orders, {len(data['nav'])} NAV days, "
           f"{len(data['cash_flows'])} cash flows, {len(data['positions'])} positions")
-    return (f"{len(data['accounts'])} accounts, {len(data['trades'])} orders, NAV through {last_day}")
+    message = f"{len(data['accounts'])} accounts, {len(data['trades'])} orders, NAV through {last_day}"
+    if data['excluded']:
+        message += '; IBKR excluded ' + ', '.join(f'…{a[-2:]}' for a in data['excluded']) + \
+                   ' (regenerate the Flex Web Service token with all accounts selected, or upload a statement)'
+    return message, data['excluded']
 
 
 @app.route('/api/ibkr/statement', methods=['POST'])
@@ -1399,10 +1405,10 @@ def upload_ibkr_statement():
     if not xml.lstrip().startswith(b'<FlexQueryResponse'):
         return jsonify({'status': 'error', 'message': 'not a Flex statement (XML)'}), 400
     with _flex_lock:
-        message = store_flex_statement(xml)
+        message, excluded = store_flex_statement(xml)
     with _sync_lock:
         _after_import()
-    set_status('ibkr_flex_upload', True, message)
+    set_status('ibkr_flex_upload', not excluded, message)
     return jsonify({'status': 'success', 'message': message}), 200
 
 

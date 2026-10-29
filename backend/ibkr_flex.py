@@ -12,6 +12,7 @@ base currency (USD); cash transactions are in their own currency with fxRateToBa
 """
 
 import io
+import re
 import time
 import xml.etree.ElementTree as ET
 from collections import defaultdict
@@ -128,6 +129,8 @@ def parse_statement(xml: bytes) -> dict:
                with IBKR's transactionID and the amount in USD
     positions  open positions of each account on its latest statement day (position_days)
     accounts   account ids seen in the statement
+    excluded   account ids IBKR left out of the statement (its <Message> says so; seen with a
+               Web Service token that cannot see every account of the query)
     """
     execs = defaultdict(list)
     nav: dict[tuple, dict] = {}
@@ -136,6 +139,7 @@ def parse_statement(xml: bytes) -> dict:
     positions: list[dict] = []
     statement_day: dict[str, str] = {}
     accounts: set[str] = set()
+    excluded: list[str] = []
 
     statement_of_day = ""
     transfer_days: set[tuple] = set()
@@ -203,6 +207,8 @@ def parse_statement(xml: bytes) -> dict:
                 "external_id": f"IB-T-{account}-{a['transactionID']}",
             }
 
+        elif tag == "Message" and "excluded" in (el.text or ""):
+            excluded += re.findall(r"U\d+", el.text)
         elif tag == "OpenPosition" and a.get("assetCategory", "STK") == "STK":
             qty = _f(a.get("position"))
             positions.append({
@@ -280,4 +286,5 @@ def parse_statement(xml: bytes) -> dict:
         "positions": [p for p in positions if p["report_date"] == statement_day.get(p["account"])],
         "position_days": statement_day,
         "accounts": sorted(accounts),
+        "excluded": sorted(set(excluded)),
     }
