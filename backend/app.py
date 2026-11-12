@@ -1263,7 +1263,9 @@ def _after_import() -> None:
 # Read through IBKR's Flex Web Service with a token from Client Portal (Performance & Reports →
 # Flex Queries → Flex Web Service); the query and its sections are described in ibkr_flex.py.
 IBKR_FLEX_TOKEN    = os.environ.get('IBKR_FLEX_TOKEN', '')
-IBKR_FLEX_QUERY_ID = os.environ.get('IBKR_FLEX_QUERY_ID', '')
+# Comma-separated query ids. The Web Service leaves an account out of a multi-account query
+# ("The following accounts were excluded"), so each account can get a query of its own
+IBKR_FLEX_QUERY_IDS = [q.strip() for q in os.environ.get('IBKR_FLEX_QUERY_ID', '').split(',') if q.strip()]
 FLEX_REFRESH_SECS  = 3 * 3600       # a statement changes once a day
 FLEX_FETCH_FROM_ET = 20             # IBKR answers 1001 ("could not be generated") through the day; only the
                                     # 20:30 ET sync fetches, the 07:00 and 16:30 ones leave the Web Service alone
@@ -1279,12 +1281,12 @@ def ibkr_account(account_id: str) -> str:
 
 
 def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
-    """Fetch the Flex statement and upsert fills, daily NAV, cash flows and open positions.
+    """Fetch the Flex statements and upsert fills, daily NAV, cash flows and open positions.
     Safe to repeat: every row is keyed by IBKR's own ids or by account and day. Routine fetches
-    cover the last FLEX_RECENT_DAYS; full=True asks for the query's whole period (a first import,
+    cover the last FLEX_RECENT_DAYS; full=True asks for the queries' whole period (a first import,
     or a new account's history)."""
     import ibkr_flex
-    if not (IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_ID):
+    if not (IBKR_FLEX_TOKEN and IBKR_FLEX_QUERY_IDS):
         set_status('ibkr_flex', False, 'not configured (IBKR_FLEX_TOKEN / IBKR_FLEX_QUERY_ID)')
         return
     # automatic fetching switched off (e.g. while IBKR has the Web Service locked); statements
@@ -1300,29 +1302,39 @@ def import_ibkr_flex(force: bool = False, full: bool = False) -> None:
     # IBKR locks the token out after too many failed requests; asking again only prolongs it
     if last and not last['ok'] and f"Flex error {ibkr_flex.LOCKED_OUT}" in last['message'] and age < FLEX_LOCKOUT_PAUSE_SECS:
         return
-    try:
-        today = now_et()
-        conn = sqlite3.connect(DB_FILE)
-        has_history = conn.execute("SELECT 1 FROM account_nav_daily WHERE account LIKE 'IBKR:%' LIMIT 1").fetchone()
-        conn.close()
-        if full or not has_history:
-            xml = ibkr_flex.fetch_statement(IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID)
-        else:
-            xml = ibkr_flex.fetch_statement(IBKR_FLEX_TOKEN, IBKR_FLEX_QUERY_ID,
-                                            (today - pd.Timedelta(days=FLEX_RECENT_DAYS)).strftime('%Y%m%d'),
-                                            today.strftime('%Y%m%d'))
-        message, excluded = store_flex_statement(xml)
-        # a statement missing an account still updates the others, but shows as a warning
-        set_status('ibkr_flex', not excluded, message)
-    except Exception as e:
-        set_status('ibkr_flex', False, f'fetch failed: {e}')
-        print(f"[ibkr_flex] fetch failed: {e}")
+    today = now_et()
+    conn = sqlite3.connect(DB_FILE)
+    has_history = conn.execute("SELECT 1 FROM account_nav_daily WHERE account LIKE 'IBKR:%' LIMIT 1").fetchone()
+    conn.close()
+    period = () if full or not has_history else (
+        (today - pd.Timedelta(days=FLEX_RECENT_DAYS)).strftime('%Y%m%d'), today.strftime('%Y%m%d'))
+    messages, excluded, covered = [], set(), set()
+    for query_id in IBKR_FLEX_QUERY_IDS:
+        try:
+            message, left_out, accounts = store_flex_statement(ibkr_flex.fetch_statement(
+                IBKR_FLEX_TOKEN, query_id, *period))
+        except Exception as e:
+            # the statements already stored stay; a lockout is the token's, so stop asking
+            messages.append(f'query {query_id}: fetch failed: {e}')
+            print(f"[ibkr_flex] query {query_id} fetch failed: {e}")
+            set_status('ibkr_flex', False, '; '.join(messages))
+            return
+        messages.append(message)
+        excluded |= set(left_out)
+        covered |= set(accounts)
+    # an account one query leaves out is fine when another query has it; otherwise the
+    # statements still update the other accounts, but it shows as a warning
+    missing = sorted(excluded - covered)
+    if missing:
+        messages.append('IBKR excluded ' + ', '.join(f'…{a[-2:]}' for a in missing) +
+                        ' (give that account a Flex query of its own, or upload a statement)')
+    set_status('ibkr_flex', not missing, '; '.join(messages))
 
 
-def store_flex_statement(xml: bytes) -> tuple[str, list[str]]:
+def store_flex_statement(xml: bytes) -> tuple[str, list[str], list[str]]:
     """Archive a Flex statement and upsert its fills, daily NAV, cash flows and open positions.
     Used by the Web Service fetch and by statements downloaded from Client Portal. Returns a
-    summary and the accounts IBKR excluded from the statement."""
+    summary, the accounts IBKR excluded from the statement and the accounts it covers."""
     import ibkr_flex
     data = ibkr_flex.parse_statement(xml)   # parse first: a file that isn't a statement is rejected
     os.makedirs(FLEX_ARCHIVE_DIR, mode=0o700, exist_ok=True)
@@ -1391,11 +1403,9 @@ def store_flex_statement(xml: bytes) -> tuple[str, list[str]]:
     last_day = max((n['date'] for n in data['nav']), default='—')
     print(f"[ibkr_flex] {len(data['trades'])} orders, {len(data['nav'])} NAV days, "
           f"{len(data['cash_flows'])} cash flows, {len(data['positions'])} positions")
-    message = f"{len(data['accounts'])} accounts, {len(data['trades'])} orders, NAV through {last_day}"
-    if data['excluded']:
-        message += '; IBKR excluded ' + ', '.join(f'…{a[-2:]}' for a in data['excluded']) + \
-                   ' (regenerate the Flex Web Service token with all accounts selected, or upload a statement)'
-    return message, data['excluded']
+    accounts = ', '.join(f'…{a[-2:]}' for a in data['accounts'])
+    message = f"{accounts}: {len(data['trades'])} orders, NAV through {last_day}"
+    return message, data['excluded'], data['accounts']
 
 
 @app.route('/api/ibkr/statement', methods=['POST'])
@@ -1409,7 +1419,9 @@ def upload_ibkr_statement():
     if not xml.lstrip().startswith(b'<FlexQueryResponse'):
         return jsonify({'status': 'error', 'message': 'not a Flex statement (XML)'}), 400
     with _flex_lock:
-        message, excluded = store_flex_statement(xml)
+        message, excluded, _ = store_flex_statement(xml)
+    if excluded:
+        message += '; IBKR excluded ' + ', '.join(f'…{a[-2:]}' for a in excluded)
     with _sync_lock:
         _after_import()
     set_status('ibkr_flex_upload', not excluded, message)

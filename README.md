@@ -117,7 +117,7 @@ All secrets and environment-specific values are loaded from `.env` files, which 
 |------|-----------|
 | `backend/.env` | `MOOMOO_PWD`, `MOOMOO_ACC_ID`, `MOOMOO_HOST`, `MOOMOO_PORT`, `DEEPSEEK_API_KEY` (optional, enables Journal AI) |
 | `web/.env` | `VITE_API_URL` (dev proxy target only) |
-| Optional backend env | `VENCH_HOST` / `VENCH_PORT` (default `127.0.0.1:5001`), `CORS_ORIGINS` (default `http://localhost:5173`), `VENCH_WEB_DIST`, `RAG_IDLE_UNLOAD_SECS` (default 600), `IBKR_FLEX_TOKEN` / `IBKR_FLEX_QUERY_ID` (IBKR Flex Web Service; the query's sections are listed in `backend/ibkr_flex.py`) |
+| Optional backend env | `VENCH_HOST` / `VENCH_PORT` (default `127.0.0.1:5001`), `CORS_ORIGINS` (default `http://localhost:5173`), `VENCH_WEB_DIST`, `RAG_IDLE_UNLOAD_SECS` (default 600), `IBKR_FLEX_TOKEN` / `IBKR_FLEX_QUERY_ID` (IBKR Flex Web Service; comma-separated query ids, one per account if the service leaves an account out; the sections are listed in `backend/ibkr_flex.py`) |
 
 ## License
 
@@ -237,7 +237,7 @@ Flutter 应用早于 Web 端开发，仅保留作参考；Web 端已覆盖其全
 |------|------|
 | `backend/.env` | `MOOMOO_PWD`、`MOOMOO_ACC_ID`、`MOOMOO_HOST`、`MOOMOO_PORT`、`DEEPSEEK_API_KEY`（可选，启用 Journal AI） |
 | `web/.env` | `VITE_API_URL`（仅开发代理使用） |
-| 可选的后端环境变量 | `VENCH_HOST` / `VENCH_PORT`（默认 `127.0.0.1:5001`）、`CORS_ORIGINS`（默认 `http://localhost:5173`）、`VENCH_WEB_DIST`、`RAG_IDLE_UNLOAD_SECS`（默认 600）、`IBKR_FLEX_TOKEN` / `IBKR_FLEX_QUERY_ID`（IBKR Flex Web Service，查询需要的区段见 `backend/ibkr_flex.py`） |
+| 可选的后端环境变量 | `VENCH_HOST` / `VENCH_PORT`（默认 `127.0.0.1:5001`）、`CORS_ORIGINS`（默认 `http://localhost:5173`）、`VENCH_WEB_DIST`、`RAG_IDLE_UNLOAD_SECS`（默认 600）、`IBKR_FLEX_TOKEN` / `IBKR_FLEX_QUERY_ID`（IBKR Flex Web Service，多个查询 id 用逗号分隔，Web Service 漏掉某个账户时给它单独建一个查询；需要的区段见 `backend/ibkr_flex.py`） |
 
 ## 许可证
 
