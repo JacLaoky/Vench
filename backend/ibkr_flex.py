@@ -126,7 +126,9 @@ def parse_statement(xml: bytes) -> dict:
     nav        one row per account and day: nav, cash, stock, flow (deposits/withdrawals and asset
                transfers, the money that is not performance) and IBKR's own daily TWR in %
     cash_flows cash transactions (deposits, withdrawals, dividends, tax, interest, fees), each
-               with IBKR's transactionID and the amount in USD
+               with IBKR's transactionID and the amount in USD; cash and shares moved between
+               accounts count as a withdrawal from one and a deposit to the other
+    transfers  shares moved between two IBKR accounts (from_account, to_account, code, qty, time)
     positions  open positions of each account on its latest statement day (position_days)
     accounts   account ids seen in the statement
     excluded   account ids IBKR left out of the statement (its <Message> says so; seen with a
@@ -136,6 +138,7 @@ def parse_statement(xml: bytes) -> dict:
     nav: dict[tuple, dict] = {}
     internal: dict[tuple, float] = {}
     flows: dict[str, dict] = {}
+    transfers: dict[str, dict] = {}
     positions: list[dict] = []
     statement_day: dict[str, str] = {}
     accounts: set[str] = set()
@@ -206,6 +209,33 @@ def parse_statement(xml: bytes) -> dict:
                 "description": a.get("description", "") or f"{a.get('type', '')} transfer",
                 "external_id": f"IB-T-{account}-{a['transactionID']}",
             }
+
+        elif tag == "Transfer" and a.get("assetCategory") == "STK" and _f(a.get("quantity")) and a.get("transactionID"):
+            # shares moved to or from another account: money in or out of this account at their
+            # value that day (Change in NAV's asset transfers), keyed per account like cash transfers
+            amount = _f(a.get("positionAmountInBase"))
+            symbol, qty, direction = a.get("symbol", ""), _f(a.get("quantity")), a.get("direction", "")
+            flows[f"T{account}-{a['transactionID']}"] = {
+                "account": account,
+                "date": statement_of_day or _day(a.get("reportDate") or a.get("date")),
+                "amount_usd": round(amount, 2),
+                "amount": round(amount, 2),
+                "currency": "USD",
+                "kind": "deposit" if amount > 0 else "withdrawal",
+                "description": f"{symbol} {abs(qty):g} shares transferred {direction.lower()} ({a.get('type', '')})",
+                "external_id": f"IB-T-{account}-{a['transactionID']}",
+            }
+            # between two IBKR accounts: the shares keep their fills (see move_transferred_fills)
+            if a.get("type") == "INTERNAL" and a.get("account"):
+                out = direction == "OUT"
+                transfers[a["transactionID"]] = {
+                    "transaction_id": a["transactionID"],
+                    "from_account": account if out else a["account"],
+                    "to_account": a["account"] if out else account,
+                    "code": _code(symbol),
+                    "qty": abs(qty),
+                    "time": _when(a.get("dateTime", "")),
+                }
 
         elif tag == "Message" and "excluded" in (el.text or ""):
             excluded += re.findall(r"U\d+", el.text)
@@ -282,6 +312,7 @@ def parse_statement(xml: bytes) -> dict:
         "nav": nav_rows,
         "cash_flows": cash_flows,
         "dropped_ids": dropped,
+        "transfers": list(transfers.values()),
         # holdings on each account's latest statement day (none listed = the account holds nothing)
         "positions": [p for p in positions if p["report_date"] == statement_day.get(p["account"])],
         "position_days": statement_day,

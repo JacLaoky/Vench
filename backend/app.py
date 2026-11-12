@@ -256,6 +256,24 @@ def init_db():
             commission  REAL
         )
     ''')
+    # shares moved between IBKR accounts, and the buy fills each transfer took along (see
+    # move_transferred_fills)
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ibkr_transfers (
+            transaction_id  TEXT PRIMARY KEY,
+            from_account    TEXT NOT NULL,
+            to_account      TEXT NOT NULL,
+            code            TEXT NOT NULL,
+            qty             REAL NOT NULL,
+            time            TEXT NOT NULL
+        )
+    ''')
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS ibkr_transfer_fills (
+            order_id        TEXT PRIMARY KEY,
+            transaction_id  TEXT NOT NULL
+        )
+    ''')
 
     # Accounts and how their positions count by default: swing (the right-side strategy, the unit
     # of the journal's win rate and R) or long (long-term holdings, kept out of trade statistics).
@@ -1008,7 +1026,9 @@ SCOPES = ('swing', 'long', 'all')
 def position_strategies(df: pd.DataFrame) -> pd.Series:
     """swing or long for every fill, decided per position: a strategy set by hand wins; a position
     the trading system traded (it is in the R ledger) is swing; a ticker listed as long-term for
-    its account is long; otherwise the account's default (IBKR accounts not set up yet: long)."""
+    its account is long, and so is an option on it (GLW270617C200000 under GLW); otherwise the
+    account's default (IBKR accounts not set up yet: long)."""
+    import re
     conn = sqlite3.connect(DB_FILE)
     accounts = {a: (d, {t.strip().upper() for t in lt.split(',') if t.strip()})
                 for a, d, lt in conn.execute('SELECT account, default_strategy, long_tickers FROM accounts')}
@@ -1022,7 +1042,9 @@ def position_strategies(df: pd.DataFrame) -> pd.Series:
         if pid in ledger:
             return 'swing'
         default, long_tickers = accounts.get(account, ('swing' if account == 'MOOMOO' else 'long', set()))
-        return 'long' if code.split('.')[-1].upper() in long_tickers else default
+        ticker = code.split('.')[-1].upper()
+        option = re.fullmatch(r'([A-Z]+)\d{6}[CP]\d+', ticker)
+        return 'long' if (option.group(1) if option else ticker) in long_tickers else default
 
     first = df.sort_values(['create_time', 'order_id']).groupby('position_id', sort=False).first()
     by_position = {pid: decide(pid, r['account'], r['code']) for pid, r in first.iterrows()}
@@ -1373,6 +1395,13 @@ def store_flex_statement(xml: bytes) -> tuple[str, list[str], list[str]]:
             [(ibkr_account(n['account']), n['date'], n['nav'], n['cash'], n['stock'],
               n['flow'] or 0.0, n['broker_twr']) for n in data['nav']],
         )
+        conn.executemany(
+            """INSERT OR IGNORE INTO ibkr_transfers (transaction_id, from_account, to_account, code, qty, time)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            [(t['transaction_id'], ibkr_account(t['from_account']), ibkr_account(t['to_account']), t['code'],
+              t['qty'], t['time']) for t in data['transfers']],
+        )
+        move_transferred_fills(conn)   # the upsert above puts fills back in the account that traded them
         # a cancelled withdrawal that was stored before its cancellation came in is dropped with it
         conn.executemany("DELETE FROM cash_flows WHERE external_id = ?",
                          [(x,) for x in data.get('dropped_ids', [])])
@@ -1406,6 +1435,37 @@ def store_flex_statement(xml: bytes) -> tuple[str, list[str], list[str]]:
     accounts = ', '.join(f'…{a[-2:]}' for a in data['accounts'])
     message = f"{accounts}: {len(data['trades'])} orders, NAV through {last_day}"
     return message, data['excluded'], data['accounts']
+
+
+def move_transferred_fills(conn) -> None:
+    """Shares moved to another IBKR account take their buy fills along, so the position lives on
+    in the receiving account at its original cost: nothing is realized and the sending account's
+    statistics never see it (INTC bought in the swing account, then moved to the long-term one).
+    A transfer takes the latest buys before it that add up to its quantity; one that matches no
+    such set is left alone and reported."""
+    moved = dict(conn.execute('SELECT order_id, transaction_id FROM ibkr_transfer_fills'))
+    for tid, src, dst, code, qty, when in conn.execute(
+            'SELECT transaction_id, from_account, to_account, code, qty, time FROM ibkr_transfers ORDER BY time').fetchall():
+        taken = [o for o, t in moved.items() if t == tid]
+        if not taken:
+            buys = conn.execute(
+                "SELECT order_id, qty FROM trades WHERE account = ? AND code = ? AND trd_side = 'BUY' "
+                "AND create_time <= ? ORDER BY create_time DESC", (src, code, when)).fetchall()
+            total = 0.0
+            for order_id, q in buys:
+                if order_id in moved:
+                    continue
+                taken.append(order_id)
+                total += q
+                if total >= qty - P.EPS:
+                    break
+            if abs(total - qty) > P.EPS:
+                print(f"[ibkr] transfer {tid}: no buys of {code} in {src} add up to {qty:g} shares; fills left in place")
+                continue
+            conn.executemany('INSERT INTO ibkr_transfer_fills (order_id, transaction_id) VALUES (?, ?)',
+                             [(o, tid) for o in taken])
+            moved.update({o: tid for o in taken})
+        conn.executemany('UPDATE trades SET account = ? WHERE order_id = ?', [(dst, o) for o in taken])
 
 
 @app.route('/api/ibkr/statement', methods=['POST'])
@@ -1462,6 +1522,7 @@ def rekey_ibkr_orders() -> int:
                 conn.execute('UPDATE trades SET order_id = ? WHERE order_id = ?', (new, old))
             conn.execute('UPDATE OR IGNORE trade_notes SET trade_id = ? WHERE trade_id = ?', (new, old))
             conn.execute('UPDATE OR IGNORE position_resets SET order_id = ? WHERE order_id = ?', (new, old))
+            conn.execute('UPDATE OR IGNORE ibkr_transfer_fills SET order_id = ? WHERE order_id = ?', (new, old))
     conn.close()
     if renames:
         print(f"[ibkr] {len(renames)} fills renamed to the trading system's order ids")
